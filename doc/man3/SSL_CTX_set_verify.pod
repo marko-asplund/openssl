@@ -145,6 +145,13 @@ Its return value is identical to B<preverify_ok>, so that any verification
 failure will lead to a termination of the TLS/SSL handshake with an
 alert message, if SSL_VERIFY_PEER is set.
 
+=head1 BUGS
+
+In client mode, it is not checked whether the SSL_VERIFY_PEER flag
+is set, but whether any flags are set. This can lead to
+unexpected behaviour if SSL_VERIFY_PEER and other flags are not used as
+required.
+
 =head1 RETURN VALUES
 
 The SSL*_set_verify*() functions do not provide diagnostic information.
@@ -269,7 +276,7 @@ L<SSL_get_ex_data_X509_STORE_CTX_idx(3)>).
 
 =head1 SEE ALSO
 
-L<ssl(3)>, L<SSL_new(3)>,
+L<ssl(7)>, L<SSL_new(3)>,
 L<SSL_CTX_get_verify_mode(3)>,
 L<SSL_get_verify_result(3)>,
 L<SSL_CTX_load_verify_locations(3)>,

@@ -48,7 +48,7 @@ sub new
         cert => $cert,
         debug => $debug,
         cipherc => "",
-        ciphers => "AES128-SHA",
+        ciphers => "AES128-SHA:TLS13-AES-128-GCM-SHA256",
         flight => 0,
         record_list => [],
         message_list => [],
@@ -113,7 +113,7 @@ sub clear
     my $self = shift;
 
     $self->clearClient;
-    $self->{ciphers} = "AES128-SHA";
+    $self->{ciphers} = "AES128-SHA:TLS13-AES-128-GCM-SHA256";
     $self->{serverflags} = "";
     $self->{serverconnects} = 1;
     $self->{serverpid} = 0;

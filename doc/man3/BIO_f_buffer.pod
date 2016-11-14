@@ -49,7 +49,7 @@ is expanded.
 
 These functions, other than BIO_f_buffer(), are implemented as macros.
 
-Buffering BIOs implement BIO_gets() by using BIO_read() operations on the
+Buffering BIOs implement BIO_gets() by using BIO_read_ex() operations on the
 next BIO in the chain. By prepending a buffering BIO to a chain it is therefore
 possible to provide BIO_gets() functionality if the following BIOs do not
 support it (for example SSL BIOs).
@@ -74,7 +74,7 @@ there was an error.
 
 =head1 SEE ALSO
 
-L<BIO(3)>,
+L<bio(7)>,
 L<BIO_reset(3)>,
 L<BIO_flush(3)>,
 L<BIO_pop(3)>,

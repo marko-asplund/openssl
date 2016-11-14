@@ -834,6 +834,21 @@ static SSL_CIPHER ssl3_ciphers[] = {
      256,
      256,
      },
+    {
+     1,
+     TLS1_3_TXT_AES_128_GCM_SHA256,
+     TLS1_3_CK_AES_128_GCM_SHA256,
+     SSL_kRSA,
+     SSL_aRSA,
+     SSL_AES128GCM,
+     SSL_AEAD,
+     TLS1_3_VERSION, TLS1_3_VERSION,
+     0, 0,
+     SSL_HIGH,
+     SSL_HANDSHAKE_MAC_SHA256 | TLS1_PRF_SHA256,
+     128,
+     128,
+     },
 
 #ifndef OPENSSL_NO_EC
     {
@@ -2741,7 +2756,6 @@ const SSL3_ENC_METHOD SSLv3_enc_data = {
     ssl3_generate_master_secret,
     ssl3_change_cipher_state,
     ssl3_final_finish_mac,
-    MD5_DIGEST_LENGTH + SHA_DIGEST_LENGTH,
     SSL3_MD_CLIENT_FINISHED_CONST, 4,
     SSL3_MD_SERVER_FINISHED_CONST, 4,
     ssl3_alert_code,
@@ -2749,7 +2763,6 @@ const SSL3_ENC_METHOD SSLv3_enc_data = {
              size_t, const unsigned char *, size_t,
              int use_context))ssl_undefined_function,
     0,
-    SSL3_HM_HEADER_LENGTH,
     ssl3_set_handshake_header,
     tls_close_construct_packet,
     ssl3_handshake_write
@@ -2956,8 +2969,8 @@ long ssl3_ctrl(SSL *s, int cmd, long larg, void *parg)
             nid = EC_GROUP_get_curve_name(group);
             if (nid == NID_undef)
                 return 0;
-            return tls1_set_curves(&s->tlsext_ellipticcurvelist,
-                                   &s->tlsext_ellipticcurvelist_length,
+            return tls1_set_groups(&s->tlsext_supportedgroupslist,
+                                   &s->tlsext_supportedgroupslist_length,
                                    &nid, 1);
         }
         break;
@@ -3022,7 +3035,10 @@ long ssl3_ctrl(SSL *s, int cmd, long larg, void *parg)
 
     case SSL_CTRL_GET_TLSEXT_STATUS_REQ_OCSP_RESP:
         *(unsigned char **)parg = s->tlsext_ocsp_resp;
-        return s->tlsext_ocsp_resplen;
+        if (s->tlsext_ocsp_resplen == 0
+                || s->tlsext_ocsp_resplen > LONG_MAX)
+            return -1;
+        return (long)s->tlsext_ocsp_resplen;
 
     case SSL_CTRL_SET_TLSEXT_STATUS_REQ_OCSP_RESP:
         OPENSSL_free(s->tlsext_ocsp_resp);
@@ -3033,23 +3049,8 @@ long ssl3_ctrl(SSL *s, int cmd, long larg, void *parg)
 
 #ifndef OPENSSL_NO_HEARTBEATS
     case SSL_CTRL_DTLS_EXT_SEND_HEARTBEAT:
-        if (SSL_IS_DTLS(s))
-            ret = dtls1_heartbeat(s);
-        break;
-
     case SSL_CTRL_GET_DTLS_EXT_HEARTBEAT_PENDING:
-        if (SSL_IS_DTLS(s))
-            ret = s->tlsext_hb_pending;
-        break;
-
     case SSL_CTRL_SET_DTLS_EXT_HEARTBEAT_NO_REQUESTS:
-        if (SSL_IS_DTLS(s)) {
-            if (larg)
-                s->tlsext_heartbeat |= SSL_DTLSEXT_HB_DONT_RECV_REQUESTS;
-            else
-                s->tlsext_heartbeat &= ~SSL_DTLSEXT_HB_DONT_RECV_REQUESTS;
-            ret = 1;
-        }
         break;
 #endif
 
@@ -3096,20 +3097,21 @@ long ssl3_ctrl(SSL *s, int cmd, long larg, void *parg)
         return ssl_cert_set_current(s->cert, larg);
 
 #ifndef OPENSSL_NO_EC
-    case SSL_CTRL_GET_CURVES:
+    case SSL_CTRL_GET_GROUPS:
         {
             unsigned char *clist;
             size_t clistlen;
             if (!s->session)
                 return 0;
-            clist = s->session->tlsext_ellipticcurvelist;
-            clistlen = s->session->tlsext_ellipticcurvelist_length / 2;
+            clist = s->session->tlsext_supportedgroupslist;
+            clistlen = s->session->tlsext_supportedgroupslist_length / 2;
             if (parg) {
                 size_t i;
                 int *cptr = parg;
                 unsigned int cid, nid;
                 for (i = 0; i < clistlen; i++) {
                     n2s(clist, cid);
+                    /* TODO(TLS1.3): Handle DH groups here */
                     nid = tls1_ec_curve_id2nid(cid, NULL);
                     if (nid != 0)
                         cptr[i] = nid;
@@ -3120,16 +3122,16 @@ long ssl3_ctrl(SSL *s, int cmd, long larg, void *parg)
             return (int)clistlen;
         }
 
-    case SSL_CTRL_SET_CURVES:
-        return tls1_set_curves(&s->tlsext_ellipticcurvelist,
-                               &s->tlsext_ellipticcurvelist_length, parg, larg);
+    case SSL_CTRL_SET_GROUPS:
+        return tls1_set_groups(&s->tlsext_supportedgroupslist,
+                               &s->tlsext_supportedgroupslist_length, parg, larg);
 
-    case SSL_CTRL_SET_CURVES_LIST:
-        return tls1_set_curves_list(&s->tlsext_ellipticcurvelist,
-                                    &s->tlsext_ellipticcurvelist_length, parg);
+    case SSL_CTRL_SET_GROUPS_LIST:
+        return tls1_set_groups_list(&s->tlsext_supportedgroupslist,
+                                    &s->tlsext_supportedgroupslist_length, parg);
 
-    case SSL_CTRL_GET_SHARED_CURVE:
-        return tls1_shared_curve(s, larg);
+    case SSL_CTRL_GET_SHARED_GROUP:
+        return tls1_shared_group(s, larg);
 
 #endif
     case SSL_CTRL_SET_SIGALGS:
@@ -3304,8 +3306,8 @@ long ssl3_ctx_ctrl(SSL_CTX *ctx, int cmd, long larg, void *parg)
             nid = EC_GROUP_get_curve_name(group);
             if (nid == NID_undef)
                 return 0;
-            return tls1_set_curves(&ctx->tlsext_ellipticcurvelist,
-                                   &ctx->tlsext_ellipticcurvelist_length,
+            return tls1_set_groups(&ctx->tlsext_supportedgroupslist,
+                                   &ctx->tlsext_supportedgroupslist_length,
                                    &nid, 1);
         }
         /* break; */
@@ -3401,14 +3403,14 @@ long ssl3_ctx_ctrl(SSL_CTX *ctx, int cmd, long larg, void *parg)
 #endif
 
 #ifndef OPENSSL_NO_EC
-    case SSL_CTRL_SET_CURVES:
-        return tls1_set_curves(&ctx->tlsext_ellipticcurvelist,
-                               &ctx->tlsext_ellipticcurvelist_length,
+    case SSL_CTRL_SET_GROUPS:
+        return tls1_set_groups(&ctx->tlsext_supportedgroupslist,
+                               &ctx->tlsext_supportedgroupslist_length,
                                parg, larg);
 
-    case SSL_CTRL_SET_CURVES_LIST:
-        return tls1_set_curves_list(&ctx->tlsext_ellipticcurvelist,
-                                    &ctx->tlsext_ellipticcurvelist_length,
+    case SSL_CTRL_SET_GROUPS_LIST:
+        return tls1_set_groups_list(&ctx->tlsext_supportedgroupslist,
+                                    &ctx->tlsext_supportedgroupslist_length,
                                     parg);
 #endif
     case SSL_CTRL_SET_SIGALGS:
@@ -3797,12 +3799,13 @@ int ssl3_shutdown(SSL *s)
             return (ret);
         }
     } else if (!(s->shutdown & SSL_RECEIVED_SHUTDOWN)) {
+        size_t readbytes;
         /*
          * If we are waiting for a close from our peer, we are closed
          */
-        s->method->ssl_read_bytes(s, 0, NULL, NULL, 0, 0);
+        s->method->ssl_read_bytes(s, 0, NULL, NULL, 0, 0, &readbytes);
         if (!(s->shutdown & SSL_RECEIVED_SHUTDOWN)) {
-            return (-1);        /* return WANT_READ */
+            return -1;        /* return WANT_READ */
         }
     }
 
@@ -3813,16 +3816,18 @@ int ssl3_shutdown(SSL *s)
         return (0);
 }
 
-int ssl3_write(SSL *s, const void *buf, int len)
+int ssl3_write(SSL *s, const void *buf, size_t len, size_t *written)
 {
     clear_sys_error();
     if (s->s3->renegotiate)
         ssl3_renegotiate_check(s);
 
-    return s->method->ssl_write_bytes(s, SSL3_RT_APPLICATION_DATA, buf, len);
+    return s->method->ssl_write_bytes(s, SSL3_RT_APPLICATION_DATA, buf, len,
+                                      written);
 }
 
-static int ssl3_read_internal(SSL *s, void *buf, int len, int peek)
+static int ssl3_read_internal(SSL *s, void *buf, size_t len, int peek,
+                              size_t *readbytes)
 {
     int ret;
 
@@ -3832,7 +3837,7 @@ static int ssl3_read_internal(SSL *s, void *buf, int len, int peek)
     s->s3->in_read_app_data = 1;
     ret =
         s->method->ssl_read_bytes(s, SSL3_RT_APPLICATION_DATA, NULL, buf, len,
-                                  peek);
+                                  peek, readbytes);
     if ((ret == -1) && (s->s3->in_read_app_data == 2)) {
         /*
          * ssl3_read_bytes decided to call s->handshake_func, which called
@@ -3844,22 +3849,22 @@ static int ssl3_read_internal(SSL *s, void *buf, int len, int peek)
         ossl_statem_set_in_handshake(s, 1);
         ret =
             s->method->ssl_read_bytes(s, SSL3_RT_APPLICATION_DATA, NULL, buf,
-                                      len, peek);
+                                      len, peek, readbytes);
         ossl_statem_set_in_handshake(s, 0);
     } else
         s->s3->in_read_app_data = 0;
 
-    return (ret);
+    return ret;
 }
 
-int ssl3_read(SSL *s, void *buf, int len)
+int ssl3_read(SSL *s, void *buf, size_t len, size_t *readbytes)
 {
-    return ssl3_read_internal(s, buf, len, 0);
+    return ssl3_read_internal(s, buf, len, 0, readbytes);
 }
 
-int ssl3_peek(SSL *s, void *buf, int len)
+int ssl3_peek(SSL *s, void *buf, size_t len, size_t *readbytes)
 {
-    return ssl3_read_internal(s, buf, len, 1);
+    return ssl3_read_internal(s, buf, len, 1, readbytes);
 }
 
 int ssl3_renegotiate(SSL *s)
@@ -3923,7 +3928,7 @@ long ssl_get_algorithm2(SSL *s)
  * Fill a ClientRandom or ServerRandom field of length len. Returns <= 0 on
  * failure, 1 on success.
  */
-int ssl_fill_hello_random(SSL *s, int server, unsigned char *result, int len)
+int ssl_fill_hello_random(SSL *s, int server, unsigned char *result, size_t len)
 {
     int send_time = 0;
 
@@ -3937,15 +3942,18 @@ int ssl_fill_hello_random(SSL *s, int server, unsigned char *result, int len)
         unsigned long Time = (unsigned long)time(NULL);
         unsigned char *p = result;
         l2n(Time, p);
-        return RAND_bytes(p, len - 4);
+        /* TODO(size_t): Convert this */
+        return RAND_bytes(p, (int)(len - 4));
     } else
-        return RAND_bytes(result, len);
+        return RAND_bytes(result, (int)len);
 }
 
 int ssl_generate_master_secret(SSL *s, unsigned char *pms, size_t pmslen,
                                int free_pms)
 {
     unsigned long alg_k = s->s3->tmp.new_cipher->algorithm_mkey;
+    int ret = 0;
+
     if (alg_k & SSL_PSK) {
 #ifndef OPENSSL_NO_PSK
         unsigned char *pskpms, *t;
@@ -3960,10 +3968,8 @@ int ssl_generate_master_secret(SSL *s, unsigned char *pms, size_t pmslen,
 
         pskpmslen = 4 + pmslen + psklen;
         pskpms = OPENSSL_malloc(pskpmslen);
-        if (pskpms == NULL) {
-            s->session->master_key_length = 0;
+        if (pskpms == NULL)
             goto err;
-        }
         t = pskpms;
         s2n(pmslen, t);
         if (alg_k & SSL_kPSK)
@@ -3976,23 +3982,23 @@ int ssl_generate_master_secret(SSL *s, unsigned char *pms, size_t pmslen,
 
         OPENSSL_clear_free(s->s3->tmp.psk, psklen);
         s->s3->tmp.psk = NULL;
-        s->session->master_key_length =
-            s->method->ssl3_enc->generate_master_secret(s,
-                                                        s->session->master_key,
-                                                        pskpms, pskpmslen);
+        if (!s->method->ssl3_enc->generate_master_secret(s,
+                    s->session->master_key,pskpms, pskpmslen,
+                    &s->session->master_key_length))
+            goto err;
         OPENSSL_clear_free(pskpms, pskpmslen);
 #else
         /* Should never happen */
-        s->session->master_key_length = 0;
         goto err;
 #endif
     } else {
-        s->session->master_key_length =
-            s->method->ssl3_enc->generate_master_secret(s,
-                                                        s->session->master_key,
-                                                        pms, pmslen);
+        if (!s->method->ssl3_enc->generate_master_secret(s,
+                s->session->master_key, pms, pmslen,
+                &s->session->master_key_length))
+            goto err;
     }
 
+    ret = 1;
  err:
     if (pms) {
         if (free_pms)
@@ -4002,7 +4008,7 @@ int ssl_generate_master_secret(SSL *s, unsigned char *pms, size_t pmslen,
     }
     if (s->server == 0)
         s->s3->tmp.pms = NULL;
-    return s->session->master_key_length >= 0;
+    return ret;
 }
 
 /* Generate a private key from parameters */

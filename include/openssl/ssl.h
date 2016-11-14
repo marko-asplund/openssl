@@ -343,12 +343,13 @@ typedef int (*custom_ext_parse_cb) (SSL *s, unsigned int ext_type,
 # define SSL_OP_NO_TLSv1                                 0x04000000U
 # define SSL_OP_NO_TLSv1_2                               0x08000000U
 # define SSL_OP_NO_TLSv1_1                               0x10000000U
+# define SSL_OP_NO_TLSv1_3                               0x20000000U
 
 # define SSL_OP_NO_DTLSv1                                0x04000000U
 # define SSL_OP_NO_DTLSv1_2                              0x08000000U
 
 # define SSL_OP_NO_SSL_MASK (SSL_OP_NO_SSLv3|\
-        SSL_OP_NO_TLSv1|SSL_OP_NO_TLSv1_1|SSL_OP_NO_TLSv1_2)
+        SSL_OP_NO_TLSv1|SSL_OP_NO_TLSv1_1|SSL_OP_NO_TLSv1_2|SSL_OP_NO_TLSv1_3)
 # define SSL_OP_NO_DTLS_MASK (SSL_OP_NO_DTLSv1|SSL_OP_NO_DTLSv1_2)
 
 
@@ -1108,10 +1109,10 @@ DECLARE_PEM_rw(SSL_SESSION, SSL_SESSION)
 # define SSL_CTRL_CLEAR_EXTRA_CHAIN_CERTS        83
 # define SSL_CTRL_CHAIN                          88
 # define SSL_CTRL_CHAIN_CERT                     89
-# define SSL_CTRL_GET_CURVES                     90
-# define SSL_CTRL_SET_CURVES                     91
-# define SSL_CTRL_SET_CURVES_LIST                92
-# define SSL_CTRL_GET_SHARED_CURVE               93
+# define SSL_CTRL_GET_GROUPS                     90
+# define SSL_CTRL_SET_GROUPS                     91
+# define SSL_CTRL_SET_GROUPS_LIST                92
+# define SSL_CTRL_GET_SHARED_GROUP               93
 # define SSL_CTRL_SET_SIGALGS                    97
 # define SSL_CTRL_SET_SIGALGS_LIST               98
 # define SSL_CTRL_CERT_FLAGS                     99
@@ -1226,18 +1227,30 @@ DECLARE_PEM_rw(SSL_SESSION, SSL_SESSION)
         SSL_ctrl(s,SSL_CTRL_SET_CHAIN_CERT_STORE,0,(char *)st)
 # define SSL_set1_chain_cert_store(s,st) \
         SSL_ctrl(s,SSL_CTRL_SET_CHAIN_CERT_STORE,1,(char *)st)
+# define SSL_get1_groups(ctx, s) \
+        SSL_ctrl(ctx,SSL_CTRL_GET_GROUPS,0,(char *)s)
 # define SSL_get1_curves(ctx, s) \
-        SSL_ctrl(ctx,SSL_CTRL_GET_CURVES,0,(char *)s)
+        SSL_get1_groups((ctx), (s))
+# define SSL_CTX_set1_groups(ctx, glist, glistlen) \
+        SSL_CTX_ctrl(ctx,SSL_CTRL_SET_GROUPS,glistlen,(char *)glist)
+# define SSL_CTX_set1_groups_list(ctx, s) \
+        SSL_CTX_ctrl(ctx,SSL_CTRL_SET_GROUPS_LIST,0,(char *)s)
 # define SSL_CTX_set1_curves(ctx, clist, clistlen) \
-        SSL_CTX_ctrl(ctx,SSL_CTRL_SET_CURVES,clistlen,(char *)clist)
+        SSL_CTX_set1_groups((ctx), (clist), (clistlen))
 # define SSL_CTX_set1_curves_list(ctx, s) \
-        SSL_CTX_ctrl(ctx,SSL_CTRL_SET_CURVES_LIST,0,(char *)s)
+        SSL_CTX_set1_groups_list((ctx), (s))
+# define SSL_set1_groups(ctx, glist, glistlen) \
+        SSL_ctrl(ctx,SSL_CTRL_SET_GROUPS,glistlen,(char *)glist)
+# define SSL_set1_groups_list(ctx, s) \
+        SSL_ctrl(ctx,SSL_CTRL_SET_GROUPS_LIST,0,(char *)s)
 # define SSL_set1_curves(ctx, clist, clistlen) \
-        SSL_ctrl(ctx,SSL_CTRL_SET_CURVES,clistlen,(char *)clist)
+        SSL_set1_groups((ctx), (clist), (clistlen))
 # define SSL_set1_curves_list(ctx, s) \
-        SSL_ctrl(ctx,SSL_CTRL_SET_CURVES_LIST,0,(char *)s)
+        SSL_set1_groups_list((ctx), (s))
+# define SSL_get_shared_group(s, n) \
+        SSL_ctrl(s,SSL_CTRL_GET_SHARED_GROUP,n,NULL)
 # define SSL_get_shared_curve(s, n) \
-        SSL_ctrl(s,SSL_CTRL_GET_SHARED_CURVE,n,NULL)
+        SSL_get_shared_group((s), (n))
 # define SSL_CTX_set1_sigalgs(ctx, slist, slistlen) \
         SSL_CTX_ctrl(ctx,SSL_CTRL_SET_SIGALGS,slistlen,(int *)slist)
 # define SSL_CTX_set1_sigalgs_list(ctx, s) \
@@ -1308,6 +1321,7 @@ __owur long SSL_CTX_set_timeout(SSL_CTX *ctx, long t);
 __owur long SSL_CTX_get_timeout(const SSL_CTX *ctx);
 __owur X509_STORE *SSL_CTX_get_cert_store(const SSL_CTX *);
 void SSL_CTX_set_cert_store(SSL_CTX *, X509_STORE *);
+void SSL_CTX_set1_cert_store(SSL_CTX *, X509_STORE *);
 __owur int SSL_want(const SSL *s);
 __owur int SSL_clear(SSL *s);
 
@@ -1566,8 +1580,11 @@ __owur int SSL_get_changed_async_fds(SSL *s, OSSL_ASYNC_FD *addfd,
 __owur int SSL_accept(SSL *ssl);
 __owur int SSL_connect(SSL *ssl);
 __owur int SSL_read(SSL *ssl, void *buf, int num);
+__owur int SSL_read_ex(SSL *ssl, void *buf, size_t num, size_t *read);
 __owur int SSL_peek(SSL *ssl, void *buf, int num);
+__owur int SSL_peek_ex(SSL *ssl, void *buf, size_t num, size_t *read);
 __owur int SSL_write(SSL *ssl, const void *buf, int num);
+__owur int SSL_write_ex(SSL *s, const void *buf, size_t num, size_t *written);
 long SSL_ctrl(SSL *ssl, int cmd, long larg, void *parg);
 long SSL_callback_ctrl(SSL *, int, void (*)(void));
 long SSL_CTX_ctrl(SSL_CTX *ctx, int cmd, long larg, void *parg);
@@ -1627,6 +1644,8 @@ DEPRECATEDIN_1_1_0(__owur const SSL_METHOD *DTLSv1_2_client_method(void)) /* DTL
 __owur const SSL_METHOD *DTLS_method(void); /* DTLS 1.0 and 1.2 */
 __owur const SSL_METHOD *DTLS_server_method(void); /* DTLS 1.0 and 1.2 */
 __owur const SSL_METHOD *DTLS_client_method(void); /* DTLS 1.0 and 1.2 */
+
+__owur size_t DTLS_get_data_mtu(const SSL *s);
 
 __owur STACK_OF(SSL_CIPHER) *SSL_get_ciphers(const SSL *s);
 __owur STACK_OF(SSL_CIPHER) *SSL_CTX_get_ciphers(const SSL_CTX *ctx);
@@ -2175,7 +2194,9 @@ int ERR_load_SSL_strings(void);
 # define SSL_F_SSL_PARSE_SERVERHELLO_TLSEXT               303
 # define SSL_F_SSL_PARSE_SERVERHELLO_USE_SRTP_EXT         311
 # define SSL_F_SSL_PEEK                                   270
+# define SSL_F_SSL_PEEK_EX                                432
 # define SSL_F_SSL_READ                                   223
+# define SSL_F_SSL_READ_EX                                434
 # define SSL_F_SSL_SCAN_CLIENTHELLO_TLSEXT                320
 # define SSL_F_SSL_SCAN_SERVERHELLO_TLSEXT                321
 # define SSL_F_SSL_SESSION_DUP                            348
@@ -2212,6 +2233,7 @@ int ERR_load_SSL_strings(void);
 # define SSL_F_SSL_VALIDATE_CT                            400
 # define SSL_F_SSL_VERIFY_CERT_CHAIN                      207
 # define SSL_F_SSL_WRITE                                  208
+# define SSL_F_SSL_WRITE_EX                               433
 # define SSL_F_STATE_MACHINE                              353
 # define SSL_F_TLS12_CHECK_PEER_SIGALG                    333
 # define SSL_F_TLS1_CHANGE_CIPHER_STATE                   209
@@ -2223,6 +2245,7 @@ int ERR_load_SSL_strings(void);
 # define SSL_F_TLS1_SETUP_KEY_BLOCK                       211
 # define SSL_F_TLS1_SET_SERVER_SIGALGS                    335
 # define SSL_F_TLS_CLIENT_KEY_EXCHANGE_POST_WORK          354
+# define SSL_F_TLS_COLLECT_EXTENSIONS                     435
 # define SSL_F_TLS_CONSTRUCT_CERTIFICATE_REQUEST          372
 # define SSL_F_TLS_CONSTRUCT_CERT_STATUS                  429
 # define SSL_F_TLS_CONSTRUCT_CHANGE_CIPHER_SPEC           427

@@ -2,7 +2,7 @@
 
 =head1 NAME
 
-SSL - OpenSSL SSL/TLS library
+ssl - OpenSSL SSL/TLS library
 
 =head1 SYNOPSIS
 
@@ -28,8 +28,8 @@ connection with the object.
 Then the TLS/SSL handshake is performed using
 L<SSL_accept(3)> or L<SSL_connect(3)>
 respectively.
-L<SSL_read(3)> and L<SSL_write(3)> are used
-to read and write data on the TLS/SSL connection.
+L<SSL_read_ex(3)>, L<SSL_read(3)>, L<SSL_write_ex(3)> and L<SSL_write(3)> are
+used to read and write data on the TLS/SSL connection.
 L<SSL_shutdown(3)> can be used to shut down the
 TLS/SSL connection.
 
@@ -319,6 +319,8 @@ protocol context defined in the B<SSL_CTX> structure.
 =item int B<SSL_CTX_set_app_data>(SSL_CTX *ctx, void *arg);
 
 =item void B<SSL_CTX_set_cert_store>(SSL_CTX *ctx, X509_STORE *cs);
+
+=item void B<SSL_CTX_set1_cert_store>(SSL_CTX *ctx, X509_STORE *cs);
 
 =item void B<SSL_CTX_set_cert_verify_cb>(SSL_CTX *ctx, int (*cb)(), char *arg)
 
@@ -734,7 +736,7 @@ See the individual manual pages for details.
 
 =head1 SEE ALSO
 
-L<openssl(1)>, L<crypto(3)>,
+L<openssl(1)>, L<crypto(7)>,
 L<CRYPTO_get_ex_new_index(3)>,
 L<SSL_accept(3)>, L<SSL_clear(3)>,
 L<SSL_connect(3)>,
@@ -765,6 +767,7 @@ L<SSL_CTX_set_msg_callback(3)>,
 L<SSL_CTX_set_options(3)>,
 L<SSL_CTX_set_quiet_shutdown(3)>,
 L<SSL_CTX_set_read_ahead(3)>,
+L<SSL_CTX_set_security_level(3)>,
 L<SSL_CTX_set_session_cache_mode(3)>,
 L<SSL_CTX_set_session_id_context(3)>,
 L<SSL_CTX_set_ssl_version(3)>,
@@ -790,6 +793,7 @@ L<SSL_get_version(3)>,
 L<SSL_load_client_CA_file(3)>,
 L<SSL_new(3)>,
 L<SSL_pending(3)>,
+L<SSL_read_ex(3)>,
 L<SSL_read(3)>,
 L<SSL_rstate_string(3)>,
 L<SSL_session_reused(3)>,
@@ -801,6 +805,7 @@ L<SSL_set_shutdown(3)>,
 L<SSL_shutdown(3)>,
 L<SSL_state_string(3)>,
 L<SSL_want(3)>,
+L<SSL_write_ex(3)>,
 L<SSL_write(3)>,
 L<SSL_SESSION_free(3)>,
 L<SSL_SESSION_get_time(3)>,

@@ -174,7 +174,7 @@ CC= $(CROSS_COMPILE){- $target{cc} -}
 CFLAGS={- our $cflags2 = join(" ",(map { "-D".$_} @{$target{defines}}, @{$config{defines}}),"-DOPENSSLDIR=\"\\\"\$(OPENSSLDIR)\\\"\"","-DENGINESDIR=\"\\\"\$(ENGINESDIR)\\\"\"") -} {- $target{cflags} -} {- $config{cflags} -}
 CFLAGS_Q={- $cflags2 =~ s|([\\"])|\\$1|g; $cflags2 -} {- $config{cflags} -}
 CXX= $(CROSS_COMPILE){- $target{cxx} -}
-CXXFLAGS={- our $cxxflags2 = join(" ",(map { "-D".$_} @{$target{defines}}, @{$config{defines}}),"-DOPENSSLDIR=\"\\\"\$(OPENSSLDIR)\\\"\"","-DENGINESDIR=\"\\\"\$(ENGINESDIR)\\\"\"") -} {- $target{cxxflags} -} {- $config{cxxflags} -}
+CXXFLAGS={- our $cxxflags2 = join(" ",(map { "-D".$_} @{$target{defines}}, @{$config{defines}}),"-DOPENSSLDIR=\"\\\"\$(OPENSSLDIR)\\\"\"","-DENGINESDIR=\"\\\"\$(ENGINESDIR)\\\"\"") -} {- $target{cxxflags} -} {- $config{cxxflags} -} -std=c++11
 LDFLAGS= {- $target{lflags} -}
 PLIB_LDFLAGS= {- $target{plib_lflags} -}
 EX_LIBS= {- $target{ex_libs} -} {- $config{ex_libs} -}
@@ -251,6 +251,7 @@ test: tests
 	  PERL="$(PERL)" \
 	  EXE_EXT={- $exeext -} \
 	  OPENSSL_ENGINES=../$(BLDDIR)/engines \
+	  OPENSSL_DEBUG_MEMORY=on \
 	    $(PERL) ../$(SRCDIR)/test/run_tests.pl $(TESTS) )
 	@ : {- if ($disabled{tests}) { output_on(); } else { output_off(); } "" -}
 	@echo "Tests are not supported with your chosen Configure options"
@@ -302,7 +303,7 @@ distclean: clean
 depend:
 	@: {- output_off() if $disabled{makedepend}; "" -}
 	@if egrep "^# DO NOT DELETE THIS LINE" Makefile >/dev/null && [ -z "`find $(DEPS) -newer Makefile 2>/dev/null; exit 0`" ]; then :; else \
-	  ( sed -e '/^# DO NOT DELETE THIS LINE.*/,$$d' < Makefile; \
+	  ( $(PERL) -pe 'exit 0 if /^# DO NOT DELETE THIS LINE.*/' < Makefile; \
 	    echo '# DO NOT DELETE THIS LINE -- make depend depends on it.'; \
 	    echo; \
 	    for f in $(DEPS); do \
@@ -768,7 +769,7 @@ tar:
 	cd $(SRCDIR); ls -l $(TARFILE).gz
 
 dist:
-	@$(MAKE) PREPARE_CMD='./Configure dist' tar
+	@$(MAKE) PREPARE_CMD='$(PERL) ./Configure dist' tar
 
 # Helper targets #####################################################
 
@@ -827,7 +828,7 @@ openssl.pc:
 configdata.pm: $(SRCDIR)/Configure $(SRCDIR)/config {- join(" ", @{$config{build_file_templates}}, @{$config{build_infos}}, @{$config{conf_files}}) -}
 	@echo "Detected changed: $?"
 	@echo "Reconfiguring..."
-	$(SRCDIR)/Configure reconf
+	$(PERL) $(SRCDIR)/Configure reconf
 	@echo "**************************************************"
 	@echo "***                                            ***"
 	@echo "***   Please run the same make command again   ***"
@@ -843,13 +844,13 @@ configdata.pm: $(SRCDIR)/Configure $(SRCDIR)/config {- join(" ", @{$config{build
   # It takes a list of library names and outputs a list of dependencies
   sub compute_lib_depends {
       if ($disabled{shared}) {
-          return map { $_.$libext } @_;
+          return map { $_ =~ /\.a$/ ? $`.$libext : $_.$libext } @_;
       }
 
       # Depending on shared libraries:
       # On Windows POSIX layers, we depend on {libname}.dll.a
       # On Unix platforms, we depend on {shlibname}.so
-      return map { shlib_simple($_) } @_;
+      return map { $_ =~ /\.a$/ ? $`.$libext : shlib_simple($_) } @_;
   }
 
   sub generatesrc {
@@ -1072,11 +1073,16 @@ EOF
       my $binn = basename($bin);
       my $objs = join(" ", map { $_.$objext } @{$args{objs}});
       my $deps = join(" ",compute_lib_depends(@{$args{deps}}));
-      my $linklibs = join("", map { my $d = dirname($_);
-                                    my $f = basename($_);
-                                    $d = "." if $d eq $f;
-                                    (my $l = $f) =~ s/^lib//;
-                                    " -L$d -l$l" } @{$args{deps}});
+      my $linklibs = join("", map { if ($_ =~ /\.a$/) {
+                                        " $_";
+                                    } else {
+                                        my $d = dirname($_);
+                                        my $f = basename($_);
+                                        $d = "." if $d eq $f;
+                                        (my $l = $f) =~ s/^lib//;
+                                        " -L$d -l$l"
+                                    }
+                                  } @{$args{deps}});
       my $shlib_target = $disabled{shared} ? "" : $target{shared_target};
       my $cc = '$(CC)';
       my $cflags = '$(CFLAGS) $(BIN_CFLAGS)';

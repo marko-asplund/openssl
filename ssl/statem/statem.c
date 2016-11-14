@@ -251,20 +251,6 @@ static int state_machine(SSL *s, int server)
     }
 #endif
 
-#ifndef OPENSSL_NO_HEARTBEATS
-    /*
-     * If we're awaiting a HeartbeatResponse, pretend we already got and
-     * don't await it anymore, because Heartbeats don't make sense during
-     * handshakes anyway.
-     */
-    if (s->tlsext_hb_pending) {
-        if (SSL_IS_DTLS(s))
-            dtls1_stop_timer(s);
-        s->tlsext_hb_pending = 0;
-        s->tlsext_hb_seq++;
-    }
-#endif
-
     /* Initialise state machine */
 
     if (st->state == MSG_FLOW_RENEGOTIATE) {
@@ -490,12 +476,12 @@ static SUB_STATE_RETURN read_state_machine(SSL *s)
 {
     OSSL_STATEM *st = &s->statem;
     int ret, mt;
-    unsigned long len = 0;
+    size_t len = 0;
     int (*transition) (SSL *s, int mt);
     PACKET pkt;
     MSG_PROCESS_RETURN(*process_message) (SSL *s, PACKET *pkt);
     WORK_STATE(*post_process_message) (SSL *s, WORK_STATE wst);
-    unsigned long (*max_message_size) (SSL *s);
+    size_t (*max_message_size) (SSL *s);
     void (*cb) (const SSL *ssl, int type, int val) = NULL;
 
     cb = get_callback(s);

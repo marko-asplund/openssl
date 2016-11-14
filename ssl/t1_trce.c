@@ -61,6 +61,9 @@ static ssl_trace_tbl ssl_version_tbl[] = {
     {TLS1_VERSION, "TLS 1.0"},
     {TLS1_1_VERSION, "TLS 1.1"},
     {TLS1_2_VERSION, "TLS 1.2"},
+    {TLS1_3_VERSION, "TLS 1.3"},
+    /* TODO(TLS1.3): Remove this line before release */
+    {TLS1_3_VERSION_DRAFT, TLS1_3_VERSION_DRAFT_TXT},
     {DTLS1_VERSION, "DTLS 1.0"},
     {DTLS1_2_VERSION, "DTLS 1.2"},
     {DTLS1_BAD_VER, "DTLS 1.0 (bad)"}
@@ -71,7 +74,6 @@ static ssl_trace_tbl ssl_content_tbl[] = {
     {SSL3_RT_ALERT, "Alert"},
     {SSL3_RT_HANDSHAKE, "Handshake"},
     {SSL3_RT_APPLICATION_DATA, "ApplicationData"},
-    {DTLS1_RT_HEARTBEAT, "HeartBeat"}
 };
 
 /* Handshake types */
@@ -422,6 +424,7 @@ static ssl_trace_tbl ssl_ciphers_tbl[] = {
     {0xCCAC, "TLS_ECDHE_PSK_WITH_CHACHA20_POLY1305"},
     {0xCCAD, "TLS_DHE_PSK_WITH_CHACHA20_POLY1305"},
     {0xCCAE, "TLS_RSA_PSK_WITH_CHACHA20_POLY1305"},
+    {0x1301, "TLS_AES_128_GCM_SHA256"},
     {0xFEFE, "SSL_RSA_FIPS_WITH_DES_CBC_SHA"},
     {0xFEFF, "SSL_RSA_FIPS_WITH_3DES_EDE_CBC_SHA"},
 };
@@ -444,13 +447,13 @@ static ssl_trace_tbl ssl_exts_tbl[] = {
     {TLSEXT_TYPE_client_authz, "client_authz"},
     {TLSEXT_TYPE_server_authz, "server_authz"},
     {TLSEXT_TYPE_cert_type, "cert_type"},
-    {TLSEXT_TYPE_elliptic_curves, "elliptic_curves"},
+    {TLSEXT_TYPE_supported_groups, "supported_groups"},
     {TLSEXT_TYPE_ec_point_formats, "ec_point_formats"},
     {TLSEXT_TYPE_srp, "srp"},
     {TLSEXT_TYPE_signature_algorithms, "signature_algorithms"},
     {TLSEXT_TYPE_use_srtp, "use_srtp"},
-    {TLSEXT_TYPE_heartbeat, "heartbeat"},
     {TLSEXT_TYPE_session_ticket, "session_ticket"},
+    {TLSEXT_TYPE_supported_versions, "supported_versions"},
     {TLSEXT_TYPE_renegotiate, "renegotiate"},
 # ifndef OPENSSL_NO_NEXTPROTONEG
     {TLSEXT_TYPE_next_proto_neg, "next_proto_neg"},
@@ -461,7 +464,7 @@ static ssl_trace_tbl ssl_exts_tbl[] = {
     {TLSEXT_TYPE_extended_master_secret, "extended_master_secret"}
 };
 
-static ssl_trace_tbl ssl_curve_tbl[] = {
+static ssl_trace_tbl ssl_groups_tbl[] = {
     {1, "sect163k1 (K-163)"},
     {2, "sect163r1"},
     {3, "sect163r2 (B-163)"},
@@ -527,11 +530,6 @@ static ssl_trace_tbl ssl_sig_tbl[] = {
 static ssl_trace_tbl ssl_hb_tbl[] = {
     {1, "peer_allowed_to_send"},
     {2, "peer_not_allowed_to_send"}
-};
-
-static ssl_trace_tbl ssl_hb_type_tbl[] = {
-    {1, "heartbeat_request"},
-    {2, "heartbeat_response"}
 };
 
 static ssl_trace_tbl ssl_ctype_tbl[] = {
@@ -660,13 +658,13 @@ static int ssl_print_extension(BIO *bio, int indent, int server, int extype,
             return 0;
         return ssl_trace_list(bio, indent + 2, ext + 1, xlen, 1, ssl_point_tbl);
 
-    case TLSEXT_TYPE_elliptic_curves:
+    case TLSEXT_TYPE_supported_groups:
         if (extlen < 2)
             return 0;
         xlen = (ext[0] << 8) | ext[1];
         if (extlen != xlen + 2)
             return 0;
-        return ssl_trace_list(bio, indent + 2, ext + 2, xlen, 2, ssl_curve_tbl);
+        return ssl_trace_list(bio, indent + 2, ext + 2, xlen, 2, ssl_groups_tbl);
 
     case TLSEXT_TYPE_signature_algorithms:
 
@@ -713,17 +711,21 @@ static int ssl_print_extension(BIO *bio, int indent, int server, int extype,
         break;
 
     case TLSEXT_TYPE_heartbeat:
-        if (extlen != 1)
-            return 0;
-        BIO_indent(bio, indent + 2, 80);
-        BIO_printf(bio, "HeartbeatMode: %s\n",
-                   ssl_trace_str(ext[0], ssl_hb_tbl));
-        break;
+        return 0;
 
     case TLSEXT_TYPE_session_ticket:
         if (extlen != 0)
             ssl_print_hex(bio, indent + 4, "ticket", ext, extlen);
         break;
+
+    case TLSEXT_TYPE_supported_versions:
+        if (extlen < 1)
+            return 0;
+        xlen = ext[0];
+        if (extlen != xlen + 1)
+            return 0;
+        return ssl_trace_list(bio, indent + 2, ext + 1, xlen, 2,
+                              ssl_version_tbl);
 
     default:
         BIO_dump_indent(bio, (const char *)ext, extlen, indent + 2);
@@ -995,7 +997,7 @@ static int ssl_print_server_keyex(BIO *bio, int indent, SSL *ssl,
                 return 0;
             curve = (msg[1] << 8) | msg[2];
             BIO_printf(bio, "named_curve: %s (%d)\n",
-                       ssl_trace_str(curve, ssl_curve_tbl), curve);
+                       ssl_trace_str(curve, ssl_groups_tbl), curve);
             msg += 3;
             msglen -= 3;
             if (!ssl_print_hexbuf(bio, indent + 2, "point", 1, &msg, &msglen))
@@ -1256,22 +1258,6 @@ static int ssl_print_handshake(BIO *bio, SSL *ssl,
     return 1;
 }
 
-static int ssl_print_heartbeat(BIO *bio, int indent,
-                               const unsigned char *msg, size_t msglen)
-{
-    if (msglen < 3)
-        return 0;
-    BIO_indent(bio, indent, 80);
-    BIO_printf(bio, "HeartBeatMessageType: %s\n",
-               ssl_trace_str(msg[0], ssl_hb_type_tbl));
-    msg++;
-    msglen--;
-    if (!ssl_print_hexbuf(bio, indent, "payload", 2, &msg, &msglen))
-        return 0;
-    ssl_print_hex(bio, indent, "padding", msg, msglen);
-    return 1;
-}
-
 const char *SSL_CIPHER_standard_name(const SSL_CIPHER *c)
 {
     return ssl_trace_str(c->id & 0xFFFF, ssl_ciphers_tbl);
@@ -1329,9 +1315,6 @@ void SSL_trace(int write_p, int version, int content_type,
                        SSL_alert_type_string_long(msg[0] << 8),
                        msg[0], SSL_alert_desc_string_long(msg[1]), msg[1]);
         }
-    case DTLS1_RT_HEARTBEAT:
-        ssl_print_heartbeat(bio, 4, msg, msglen);
-        break;
 
     }
 

@@ -175,7 +175,7 @@ static int ssl_cipher_info_find(const ssl_cipher_table * table,
     size_t i;
     for (i = 0; i < table_cnt; i++, table++) {
         if (table->mask == mask)
-            return i;
+            return (int)i;
     }
     return -1;
 }
@@ -197,7 +197,7 @@ static int ssl_mac_pkey_id[SSL_MD_NUM_IDX] = {
     EVP_PKEY_HMAC,
 };
 
-static int ssl_mac_secret_size[SSL_MD_NUM_IDX];
+static size_t ssl_mac_secret_size[SSL_MD_NUM_IDX];
 
 #define CIPHER_ADD      1
 #define CIPHER_KILL     2
@@ -399,8 +399,9 @@ void ssl_load_ciphers(void)
         if (md == NULL) {
             disabled_mac_mask |= t->mask;
         } else {
-            ssl_mac_secret_size[i] = EVP_MD_size(md);
-            OPENSSL_assert(ssl_mac_secret_size[i] >= 0);
+            int tmpsize = EVP_MD_size(md);
+            OPENSSL_assert(tmpsize >= 0);
+            ssl_mac_secret_size[i] = tmpsize;
         }
     }
     /* Make sure we can access MD5 and SHA1 */
@@ -502,7 +503,7 @@ static int load_builtin_compressions(void)
 
 int ssl_cipher_get_evp(const SSL_SESSION *s, const EVP_CIPHER **enc,
                        const EVP_MD **md, int *mac_pkey_type,
-                       int *mac_secret_size, SSL_COMP **comp, int use_etm)
+                       size_t *mac_secret_size, SSL_COMP **comp, int use_etm)
 {
     int i;
     const SSL_CIPHER *c;
@@ -859,6 +860,8 @@ static void ssl_cipher_apply_rule(uint32_t cipher_id, uint32_t alg_mkey,
                     cp->algorithm_enc, cp->algorithm_mac, cp->min_tls,
                     cp->algo_strength);
 #endif
+            if (cipher_id != 0 && (cipher_id != cp->id))
+                continue;
             if (alg_mkey && !(alg_mkey & cp->algorithm_mkey))
                 continue;
             if (alg_auth && !(alg_auth & cp->algorithm_auth))
@@ -1944,4 +1947,56 @@ int SSL_CIPHER_get_auth_nid(const SSL_CIPHER *c)
 int SSL_CIPHER_is_aead(const SSL_CIPHER *c)
 {
     return (c->algorithm_mac & SSL_AEAD) ? 1 : 0;
+}
+
+int ssl_cipher_get_overhead(const SSL_CIPHER *c, size_t *mac_overhead,
+                            size_t *int_overhead, size_t *blocksize,
+                            size_t *ext_overhead)
+{
+    size_t mac = 0, in = 0, blk = 0, out = 0;
+
+    /* Some hard-coded numbers for the CCM/Poly1305 MAC overhead
+     * because there are no handy #defines for those. */
+    if (c->algorithm_enc & SSL_AESGCM) {
+        out = EVP_GCM_TLS_EXPLICIT_IV_LEN + EVP_GCM_TLS_TAG_LEN;
+    } else if (c->algorithm_enc & (SSL_AES128CCM | SSL_AES256CCM)) {
+        out = EVP_CCM_TLS_EXPLICIT_IV_LEN + 16;
+    } else if (c->algorithm_enc & (SSL_AES128CCM8 | SSL_AES256CCM8)) {
+        out = EVP_CCM_TLS_EXPLICIT_IV_LEN + 8;
+    } else if (c->algorithm_enc & SSL_CHACHA20POLY1305) {
+        out = 16;
+    } else if (c->algorithm_mac & SSL_AEAD) {
+        /* We're supposed to have handled all the AEAD modes above */
+        return 0;
+    } else {
+        /* Non-AEAD modes. Calculate MAC/cipher overhead separately */
+        int digest_nid = SSL_CIPHER_get_digest_nid(c);
+        const EVP_MD *e_md = EVP_get_digestbynid(digest_nid);
+
+        if (e_md == NULL)
+            return 0;
+
+        mac = EVP_MD_size(e_md);
+        if (c->algorithm_enc != SSL_eNULL) {
+            int cipher_nid = SSL_CIPHER_get_cipher_nid(c);
+            const EVP_CIPHER *e_ciph = EVP_get_cipherbynid(cipher_nid);
+
+            /* If it wasn't AEAD or SSL_eNULL, we expect it to be a
+               known CBC cipher. */
+            if (e_ciph == NULL ||
+                EVP_CIPHER_mode(e_ciph) != EVP_CIPH_CBC_MODE)
+                return 0;
+
+            in = 1; /* padding length byte */
+            out = EVP_CIPHER_iv_length(e_ciph);
+            blk = EVP_CIPHER_block_size(e_ciph);
+        }
+    }
+
+    *mac_overhead = mac;
+    *int_overhead = in;
+    *blocksize = blk;
+    *ext_overhead = out;
+
+    return 1;
 }

@@ -18,9 +18,9 @@
 #include <openssl/x509.h>
 #include <openssl/x509v3.h>
 #include "testutil.h"
+#include "test_main_custom.h"
 
 #ifndef OPENSSL_NO_CT
-
 /* Used when declaring buffers to read text files into */
 #define CT_TEST_MAX_FILE_SIZE 8096
 
@@ -88,7 +88,6 @@ static void tear_down(CT_TEST_FIXTURE fixture)
 {
     CTLOG_STORE_free(fixture.ctlog_store);
     SCT_LIST_free(fixture.sct_list);
-    ERR_print_errors_fp(stderr);
 }
 
 static char *mk_file_path(const char *dir, const char *file)
@@ -508,20 +507,20 @@ static int test_encode_tls_sct()
     SCT *sct = SCT_new();
     if (!SCT_set_version(sct, SCT_VERSION_V1)) {
         fprintf(stderr, "Failed to set SCT version\n");
-        return 1;
+        return 0;
     }
     if (!SCT_set1_log_id(sct, log_id, 32)) {
         fprintf(stderr, "Failed to set SCT log ID\n");
-        return 1;
+        return 0;
     }
     SCT_set_timestamp(sct, 1);
     if (!SCT_set_signature_nid(sct, NID_ecdsa_with_SHA256)) {
         fprintf(stderr, "Failed to set SCT signature NID\n");
-        return 1;
+        return 0;
     }
     if (!SCT_set1_signature(sct, signature, 71)) {
         fprintf(stderr, "Failed to set SCT signature\n");
-        return 1;
+        return 0;
     }
     sk_SCT_push(sct_list, sct);
 
@@ -531,15 +530,10 @@ static int test_encode_tls_sct()
     EXECUTE_CT_TEST();
 }
 
-int main(int argc, char *argv[])
+int test_main(int argc, char *argv[])
 {
     int result = 0;
-    char *tmp_env = NULL;
-
-    tmp_env = getenv("OPENSSL_DEBUG_MEMORY");
-    if (tmp_env != NULL && strcmp(tmp_env, "on") == 0)
-        CRYPTO_set_mem_debug(1);
-    CRYPTO_mem_ctrl(CRYPTO_MEM_CHECK_ON);
+    char *tmp_env;
 
     tmp_env = getenv("CT_DIR");
     ct_dir = OPENSSL_strdup(tmp_env != NULL ? tmp_env : "ct");
@@ -555,24 +549,16 @@ int main(int argc, char *argv[])
     ADD_TEST(test_encode_tls_sct);
 
     result = run_tests(argv[0]);
-    ERR_print_errors_fp(stderr);
 
     OPENSSL_free(ct_dir);
     OPENSSL_free(certs_dir);
 
-#ifndef OPENSSL_NO_CRYPTO_MDEBUG
-    if (CRYPTO_mem_leaks_fp(stderr) <= 0)
-        result = 1;
-#endif
-
     return result;
 }
-
-#else /* OPENSSL_NO_CT */
-
-int main(int argc, char* argv[])
+#else
+int test_main(int argc, char *argv[])
 {
-    return EXIT_SUCCESS;
+    printf("No CT support\n");
+    return 0;
 }
-
-#endif /* OPENSSL_NO_CT */
+#endif

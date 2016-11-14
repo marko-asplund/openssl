@@ -316,9 +316,11 @@ $config{sdirs} = [
     "evp", "asn1", "pem", "x509", "x509v3", "conf", "txt_db", "pkcs7", "pkcs12", "comp", "ocsp", "ui",
     "cms", "ts", "srp", "cmac", "ct", "async", "kdf"
     ];
+# test/ subdirectories to build
+$config{tdirs} = [ "ossl_shim" ];
 
 # Known TLS and DTLS protocols
-my @tls = qw(ssl3 tls1 tls1_1 tls1_2);
+my @tls = qw(ssl3 tls1 tls1_1 tls1_2 tls1_3);
 my @dtls = qw(dtls1 dtls1_2);
 
 # Explicitly known options that are possible to disable.  They can
@@ -360,6 +362,7 @@ my @disablables = (
     "egd",
     "engine",
     "err",
+    "external-tests",
     "filenames",
     "fuzz-libfuzzer",
     "fuzz-afl",
@@ -429,6 +432,7 @@ our %disabled = ( # "what"         => "comment"
 		  "crypto-mdebug-backtrace" => "default",
 		  "ec_nistp_64_gcc_128" => "default",
 		  "egd"                 => "default",
+		  "external-tests"	=> "default",
 		  "fuzz-libfuzzer"	=> "default",
 		  "fuzz-afl"		=> "default",
 		  "heartbeats"          => "default",
@@ -440,6 +444,8 @@ our %disabled = ( # "what"         => "comment"
 		  "ssl3"                => "default",
 		  "ssl3-method"         => "default",
                   "ubsan"		=> "default",
+          #TODO(TLS1.3): Temporarily disabled while this is a WIP
+		  "tls1_3"              => "default",
 		  "unit-test"           => "default",
 		  "weak-ssl-ciphers"    => "default",
 		  "zlib"                => "default",
@@ -476,7 +482,7 @@ my @disable_cascades = (
     sub { $disabled{rsa}
 	  && ($disabled{dsa} || $disabled{dh})
 	  && ($disabled{ecdsa} || $disabled{ecdh}); }
-			=> [ "tls1", "tls1_1", "tls1_2",
+			=> [ "tls1", "tls1_1", "tls1_2", "tls1_3",
 			     "dtls1", "dtls1_2" ],
 
     "tls"		=> [ @tls ],
@@ -1424,6 +1430,10 @@ if ($builder eq "unified") {
         push @build_infos, [ catdir("engines", $_), "build.info" ]
             if (-f catfile($srcdir, "engines", $_, "build.info"));
     }
+    foreach (@{$config{tdirs}}) {
+        push @build_infos, [ catdir("test", $_), "build.info" ]
+            if (-f catfile($srcdir, "test", $_, "build.info"));
+    }
 
     $config{build_infos} = [ ];
 
@@ -1590,7 +1600,7 @@ if ($builder eq "unified") {
                             || $target_kind eq $target{build_file}."(".$builder_platform.")");
                 }
             },
-            qr/^(?:#.*|\s*)$/ => sub { },
+            qr/^\s*(?:#.*)?$/ => sub { },
             "OTHERWISE" => sub { die "Something wrong with this line:\n$_\nat $sourced/$f" },
             "BEFORE" => sub {
                 if ($buildinfo_debug) {
@@ -1846,9 +1856,16 @@ EOF
                     $d = cleanfile($buildd, $_, $blddir);
                 }
                 # Take note if the file to depend on is being renamed
+                # Take extra care with files ending with .a, they should
+                # be treated without that extension, and the extension
+                # should be added back after treatment.
+                $d =~ /(\.a)?$/;
+                my $e = $1 // "";
+                $d = $`;
                 if ($unified_info{rename}->{$d}) {
                     $d = $unified_info{rename}->{$d};
                 }
+                $d .= $e;
                 $unified_info{depends}->{$ddest}->{$d} = 1;
                 # If we depend on a header file or a perl module, let's make
                 # sure it can get included

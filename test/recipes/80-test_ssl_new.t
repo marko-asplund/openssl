@@ -34,7 +34,8 @@ plan tests => 18;  # = scalar @conf_srcs
 # Some test results depend on the configuration of enabled protocols. We only
 # verify generated sources in the default configuration.
 my $is_default_tls = (disabled("ssl3") && !disabled("tls1") &&
-                      !disabled("tls1_1") && !disabled("tls1_2"));
+                      !disabled("tls1_1") && !disabled("tls1_2") &&
+                      disabled("tls1_3"));
 
 my $is_default_dtls = (!disabled("dtls1") && !disabled("dtls1_2"));
 
@@ -71,7 +72,7 @@ my %skip = (
   # We should review this once we have TLS 1.3.
   "13-fragmentation.conf" => disabled("tls1_2"),
   "14-curves.conf" => disabled("tls1_2") || $no_ec || $no_ec2m,
-  "15-certstatus.conf" => $no_ocsp,
+  "15-certstatus.conf" => $no_tls || $no_ocsp,
   "16-dtls-certstatus.conf" => $no_dtls || $no_ocsp,
   "18-dtls-renegotiate.conf" => $no_dtls,
 );
