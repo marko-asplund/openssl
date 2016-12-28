@@ -61,6 +61,7 @@
 #include <openssl/bn.h>
 #include <openssl/md5.h>
 
+static int tls_construct_encrypted_extensions(SSL *s, WPACKET *pkt);
 static STACK_OF(SSL_CIPHER) *ssl_bytes_to_cipher_list(SSL *s,
                                                       PACKET *cipher_suites,
                                                       STACK_OF(SSL_CIPHER)
@@ -68,18 +69,93 @@ static STACK_OF(SSL_CIPHER) *ssl_bytes_to_cipher_list(SSL *s,
                                                       int *al);
 
 /*
- * server_read_transition() encapsulates the logic for the allowed handshake
- * state transitions when the server is reading messages from the client. The
- * message type that the client has sent is provided in |mt|. The current state
- * is in |s->statem.hand_state|.
+ * ossl_statem_server13_read_transition() encapsulates the logic for the allowed
+ * handshake state transitions when a TLSv1.3 server is reading messages from
+ * the client. The message type that the client has sent is provided in |mt|.
+ * The current state is in |s->statem.hand_state|.
  *
- *  Valid return values are:
- *  1: Success (transition allowed)
- *  0: Error (transition not allowed)
+ * Return values are 1 for success (transition allowed) and  0 on error
+ * (transition not allowed)
+ */
+static int ossl_statem_server13_read_transition(SSL *s, int mt)
+{
+    OSSL_STATEM *st = &s->statem;
+
+    /*
+     * TODO(TLS1.3): This is still based on the TLSv1.2 state machine. Over time
+     * we will update this to look more like real TLSv1.3
+     */
+
+    /*
+     * Note: There is no case for TLS_ST_BEFORE because at that stage we have
+     * not negotiated TLSv1.3 yet, so that case is handled by
+     * ossl_statem_server_read_transition()
+     */
+    switch (st->hand_state) {
+    default:
+        break;
+
+    case TLS_ST_SW_FINISHED:
+        if (s->s3->tmp.cert_request) {
+            if (mt == SSL3_MT_CERTIFICATE) {
+                st->hand_state = TLS_ST_SR_CERT;
+                return 1;
+            }
+        } else {
+            if (mt == SSL3_MT_FINISHED) {
+                st->hand_state = TLS_ST_SR_FINISHED;
+                return 1;
+            }
+        }
+        break;
+
+    case TLS_ST_SR_CERT:
+        if (s->session->peer == NULL) {
+            if (mt == SSL3_MT_FINISHED) {
+                st->hand_state = TLS_ST_SR_FINISHED;
+                return 1;
+            }
+        } else {
+            if (mt == SSL3_MT_CERTIFICATE_VERIFY) {
+                st->hand_state = TLS_ST_SR_CERT_VRFY;
+                return 1;
+            }
+        }
+        break;
+
+    case TLS_ST_SR_CERT_VRFY:
+        if (mt == SSL3_MT_FINISHED) {
+            st->hand_state = TLS_ST_SR_FINISHED;
+            return 1;
+        }
+        break;
+    }
+
+    /* No valid transition found */
+    ssl3_send_alert(s, SSL3_AL_FATAL, SSL3_AD_UNEXPECTED_MESSAGE);
+    SSLerr(SSL_F_OSSL_STATEM_SERVER13_READ_TRANSITION,
+           SSL_R_UNEXPECTED_MESSAGE);
+    return 0;
+}
+
+/*
+ * ossl_statem_server_read_transition() encapsulates the logic for the allowed
+ * handshake state transitions when the server is reading messages from the
+ * client. The message type that the client has sent is provided in |mt|. The
+ * current state is in |s->statem.hand_state|.
+ *
+ * Return values are 1 for success (transition allowed) and  0 on error
+ * (transition not allowed)
  */
 int ossl_statem_server_read_transition(SSL *s, int mt)
 {
     OSSL_STATEM *st = &s->statem;
+
+    if (SSL_IS_TLS13(s)) {
+        if (!ossl_statem_server13_read_transition(s, mt))
+            goto err;
+        return 1;
+    }
 
     switch (st->hand_state) {
     default:
@@ -212,6 +288,7 @@ int ossl_statem_server_read_transition(SSL *s, int mt)
         break;
     }
 
+ err:
     /* No valid transition found */
     ssl3_send_alert(s, SSL3_AL_FATAL, SSL3_AD_UNEXPECTED_MESSAGE);
     SSLerr(SSL_F_OSSL_STATEM_SERVER_READ_TRANSITION, SSL_R_UNEXPECTED_MESSAGE);
@@ -304,12 +381,85 @@ static int send_certificate_request(SSL *s)
 }
 
 /*
- * server_write_transition() works out what handshake state to move to next
- * when the server is writing messages to be sent to the client.
+ * ossl_statem_server13_write_transition() works out what handshake state to
+ * move to next when a TLSv1.3 server is writing messages to be sent to the
+ * client.
+ */
+static WRITE_TRAN ossl_statem_server13_write_transition(SSL *s)
+{
+    OSSL_STATEM *st = &s->statem;
+
+    /*
+     * TODO(TLS1.3): This is still based on the TLSv1.2 state machine. Over time
+     * we will update this to look more like real TLSv1.3
+     */
+
+    /*
+     * No case for TLS_ST_BEFORE, because at that stage we have not negotiated
+     * TLSv1.3 yet, so that is handled by ossl_statem_server_write_transition()
+     */
+
+    switch (st->hand_state) {
+    default:
+        /* Shouldn't happen */
+        return WRITE_TRAN_ERROR;
+
+    case TLS_ST_SR_CLNT_HELLO:
+        st->hand_state = TLS_ST_SW_SRVR_HELLO;
+        return WRITE_TRAN_CONTINUE;
+
+    case TLS_ST_SW_SRVR_HELLO:
+        st->hand_state = TLS_ST_SW_ENCRYPTED_EXTENSIONS;
+        return WRITE_TRAN_CONTINUE;
+
+    case TLS_ST_SW_ENCRYPTED_EXTENSIONS:
+        if (s->hit)
+            st->hand_state = TLS_ST_SW_FINISHED;
+        else if (send_certificate_request(s))
+            st->hand_state = TLS_ST_SW_CERT_REQ;
+        else
+            st->hand_state = TLS_ST_SW_CERT;
+
+        return WRITE_TRAN_CONTINUE;
+
+    case TLS_ST_SW_CERT_REQ:
+        st->hand_state = TLS_ST_SW_CERT;
+        return WRITE_TRAN_CONTINUE;
+
+    case TLS_ST_SW_CERT:
+            st->hand_state = s->tlsext_status_expected ? TLS_ST_SW_CERT_STATUS
+                                                       : TLS_ST_SW_FINISHED;
+        return WRITE_TRAN_CONTINUE;
+
+    case TLS_ST_SW_CERT_STATUS:
+        st->hand_state = TLS_ST_SW_FINISHED;
+        return WRITE_TRAN_CONTINUE;
+
+    case TLS_ST_SW_FINISHED:
+        return WRITE_TRAN_FINISHED;
+
+    case TLS_ST_SR_FINISHED:
+        st->hand_state = TLS_ST_OK;
+        ossl_statem_set_in_init(s, 0);
+        return WRITE_TRAN_CONTINUE;
+    }
+}
+
+/*
+ * ossl_statem_server_write_transition() works out what handshake state to move
+ * to next when the server is writing messages to be sent to the client.
  */
 WRITE_TRAN ossl_statem_server_write_transition(SSL *s)
 {
     OSSL_STATEM *st = &s->statem;
+
+    /*
+     * Note that before the ClientHello we don't know what version we are going
+     * to negotiate yet, so we don't take this branch until later
+     */
+
+    if (SSL_IS_TLS13(s))
+        return ossl_statem_server13_write_transition(s);
 
     switch (st->hand_state) {
     default:
@@ -564,6 +714,20 @@ WORK_STATE ossl_statem_server_post_work(SSL *s, WORK_STATE wst)
                      sizeof(sctpauthkey), sctpauthkey);
         }
 #endif
+        /*
+         * TODO(TLS1.3): This actually causes a problem. We don't yet know
+         * whether the next record we are going to receive is an unencrypted
+         * alert, or an encrypted handshake message. We're going to need
+         * something clever in the record layer for this.
+         */
+        if (SSL_IS_TLS13(s)) {
+            if (!s->method->ssl3_enc->setup_key_block(s)
+                || !s->method->ssl3_enc->change_cipher_state(s,
+                        SSL3_CC_HANDSHAKE | SSL3_CHANGE_CIPHER_SERVER_WRITE)
+                || !s->method->ssl3_enc->change_cipher_state(s,
+                        SSL3_CC_HANDSHAKE |SSL3_CHANGE_CIPHER_SERVER_READ))
+            return WORK_ERROR;
+        }
         break;
 
     case TLS_ST_SW_CHANGE:
@@ -606,6 +770,14 @@ WORK_STATE ossl_statem_server_post_work(SSL *s, WORK_STATE wst)
                      0, NULL);
         }
 #endif
+        if (SSL_IS_TLS13(s)) {
+            if (!s->method->ssl3_enc->generate_master_secret(s,
+                        s->session->master_key, s->handshake_secret, 0,
+                        &s->session->master_key_length)
+                || !s->method->ssl3_enc->change_cipher_state(s,
+                        SSL3_CC_APPLICATION | SSL3_CHANGE_CIPHER_SERVER_WRITE))
+            return WORK_ERROR;
+        }
         break;
     }
 
@@ -687,6 +859,11 @@ int ossl_statem_server_construct_message(SSL *s, WPACKET *pkt,
     case TLS_ST_SW_FINISHED:
         *confunc = tls_construct_finished;
         *mt = SSL3_MT_FINISHED;
+        break;
+
+    case TLS_ST_SW_ENCRYPTED_EXTENSIONS:
+        *confunc = tls_construct_encrypted_extensions;
+        *mt = SSL3_MT_ENCRYPTED_EXTENSIONS;
         break;
     }
 
@@ -825,7 +1002,7 @@ WORK_STATE ossl_statem_server_post_process_message(SSL *s, WORK_STATE wst)
 #endif
         return WORK_FINISHED_CONTINUE;
     }
-
+    return WORK_FINISHED_CONTINUE;
 }
 
 #ifndef OPENSSL_NO_SRP
@@ -884,6 +1061,69 @@ int dtls_construct_hello_verify_request(SSL *s, WPACKET *pkt)
 
     return 1;
 }
+
+#ifndef OPENSSL_NO_EC
+/*-
+ * ssl_check_for_safari attempts to fingerprint Safari using OS X
+ * SecureTransport using the TLS extension block in |hello|.
+ * Safari, since 10.6, sends exactly these extensions, in this order:
+ *   SNI,
+ *   elliptic_curves
+ *   ec_point_formats
+ *
+ * We wish to fingerprint Safari because they broke ECDHE-ECDSA support in 10.8,
+ * but they advertise support. So enabling ECDHE-ECDSA ciphers breaks them.
+ * Sadly we cannot differentiate 10.6, 10.7 and 10.8.4 (which work), from
+ * 10.8..10.8.3 (which don't work).
+ */
+static void ssl_check_for_safari(SSL *s, const CLIENTHELLO_MSG *hello)
+{
+    static const unsigned char kSafariExtensionsBlock[] = {
+        0x00, 0x0a,             /* elliptic_curves extension */
+        0x00, 0x08,             /* 8 bytes */
+        0x00, 0x06,             /* 6 bytes of curve ids */
+        0x00, 0x17,             /* P-256 */
+        0x00, 0x18,             /* P-384 */
+        0x00, 0x19,             /* P-521 */
+
+        0x00, 0x0b,             /* ec_point_formats */
+        0x00, 0x02,             /* 2 bytes */
+        0x01,                   /* 1 point format */
+        0x00,                   /* uncompressed */
+        /* The following is only present in TLS 1.2 */
+        0x00, 0x0d,             /* signature_algorithms */
+        0x00, 0x0c,             /* 12 bytes */
+        0x00, 0x0a,             /* 10 bytes */
+        0x05, 0x01,             /* SHA-384/RSA */
+        0x04, 0x01,             /* SHA-256/RSA */
+        0x02, 0x01,             /* SHA-1/RSA */
+        0x04, 0x03,             /* SHA-256/ECDSA */
+        0x02, 0x03,             /* SHA-1/ECDSA */
+    };
+    /* Length of the common prefix (first two extensions). */
+    static const size_t kSafariCommonExtensionsLength = 18;
+    unsigned int type;
+    PACKET sni, tmppkt;
+    size_t ext_len;
+
+    tmppkt = hello->extensions;
+
+    if (!PACKET_forward(&tmppkt, 2)
+        || !PACKET_get_net_2(&tmppkt, &type)
+        || !PACKET_get_length_prefixed_2(&tmppkt, &sni)) {
+        return;
+    }
+
+    if (type != TLSEXT_TYPE_server_name)
+        return;
+
+    ext_len = TLS1_get_client_version(s) >= TLS1_2_VERSION ?
+        sizeof(kSafariExtensionsBlock) : kSafariCommonExtensionsLength;
+
+    s->s3->is_probably_safari = PACKET_equal(&tmppkt, kSafariExtensionsBlock,
+                                             ext_len);
+}
+#endif                          /* !OPENSSL_NO_EC */
 
 MSG_PROCESS_RETURN tls_process_client_hello(SSL *s, PACKET *pkt)
 {
@@ -1072,8 +1312,8 @@ MSG_PROCESS_RETURN tls_process_client_hello(SSL *s, PACKET *pkt)
 
     /* Preserve the raw extensions PACKET for later use */
     extensions = clienthello.extensions;
-    if (!tls_collect_extensions(&extensions, &clienthello.pre_proc_exts,
-                                  &clienthello.num_extensions, &al)) {
+    if (!tls_collect_extensions(s, &extensions, EXT_CLIENT_HELLO,
+                                &clienthello.pre_proc_exts, &al)) {
         /* SSLerr already been called */
         goto f_err;
     }
@@ -1158,9 +1398,9 @@ MSG_PROCESS_RETURN tls_process_client_hello(SSL *s, PACKET *pkt)
     s->hit = 0;
 
     /* We need to do this before getting the session */
-    if (!tls_check_client_ems_support(s, &clienthello)) {
-        /* Only fails if the extension is malformed */
-        al = SSL_AD_DECODE_ERROR;
+    if (!tls_parse_extension(s, TLSEXT_IDX_extended_master_secret,
+                             EXT_CLIENT_HELLO,
+                             clienthello.pre_proc_exts, &al)) {
         SSLerr(SSL_F_TLS_PROCESS_CLIENT_HELLO, SSL_R_CLIENTHELLO_TLSEXT);
         goto f_err;
     }
@@ -1257,10 +1497,25 @@ MSG_PROCESS_RETURN tls_process_client_hello(SSL *s, PACKET *pkt)
         goto f_err;
     }
 
+#ifndef OPENSSL_NO_EC
+    if (s->options & SSL_OP_SAFARI_ECDHE_ECDSA_BUG)
+        ssl_check_for_safari(s, &clienthello);
+#endif                          /* !OPENSSL_NO_EC */
+
     /* TLS extensions */
-    if (!ssl_parse_clienthello_tlsext(s, &clienthello)) {
+    if (!tls_parse_all_extensions(s, EXT_CLIENT_HELLO,
+                                  clienthello.pre_proc_exts, &al)) {
         SSLerr(SSL_F_TLS_PROCESS_CLIENT_HELLO, SSL_R_PARSE_TLSEXT);
-        goto err;
+        goto f_err;
+    }
+
+    /* Check we've got a key_share for TLSv1.3 */
+    if (SSL_IS_TLS13(s) && s->s3->peer_tmp == NULL && !s->hit) {
+        /* No suitable share */
+        /* TODO(TLS1.3): Send a HelloRetryRequest */
+        al = SSL_AD_HANDSHAKE_FAILURE;
+        SSLerr(SSL_F_TLS_PROCESS_CLIENT_HELLO, SSL_R_NO_SUITABLE_KEY_SHARE);
+        goto f_err;
     }
 
     /*
@@ -1435,6 +1690,55 @@ MSG_PROCESS_RETURN tls_process_client_hello(SSL *s, PACKET *pkt)
     return MSG_PROCESS_ERROR;
 }
 
+/*
+ * Call the status request callback if needed. Upon success, returns 1.
+ * Upon failure, returns 0 and sets |*al| to the appropriate fatal alert.
+ */
+static int tls_handle_status_request(SSL *s, int *al)
+{
+    s->tlsext_status_expected = 0;
+
+    /*
+     * If status request then ask callback what to do. Note: this must be
+     * called after servername callbacks in case the certificate has changed,
+     * and must be called after the cipher has been chosen because this may
+     * influence which certificate is sent
+     */
+    if (s->tlsext_status_type != TLSEXT_STATUSTYPE_nothing && s->ctx != NULL
+            && s->ctx->tlsext_status_cb != NULL) {
+        int ret;
+        CERT_PKEY *certpkey = ssl_get_server_send_pkey(s);
+
+        /* If no certificate can't return certificate status */
+        if (certpkey != NULL) {
+            /*
+             * Set current certificate to one we will use so SSL_get_certificate
+             * et al can pick it up.
+             */
+            s->cert->key = certpkey;
+            ret = s->ctx->tlsext_status_cb(s, s->ctx->tlsext_status_arg);
+            switch (ret) {
+                /* We don't want to send a status request response */
+            case SSL_TLSEXT_ERR_NOACK:
+                s->tlsext_status_expected = 0;
+                break;
+                /* status request response should be sent */
+            case SSL_TLSEXT_ERR_OK:
+                if (s->tlsext_ocsp_resp)
+                    s->tlsext_status_expected = 1;
+                break;
+                /* something bad happened */
+            case SSL_TLSEXT_ERR_ALERT_FATAL:
+            default:
+                *al = SSL_AD_INTERNAL_ERROR;
+                return 0;
+            }
+        }
+    }
+
+    return 1;
+}
+
 WORK_STATE tls_post_process_client_hello(SSL *s, WORK_STATE wst)
 {
     int al = SSL_AD_HANDSHAKE_FAILURE;
@@ -1468,8 +1772,10 @@ WORK_STATE tls_post_process_client_hello(SSL *s, WORK_STATE wst)
             s->s3->tmp.new_cipher = cipher;
             /* check whether we should disable session resumption */
             if (s->not_resumable_session_cb != NULL)
-                s->session->not_resumable = s->not_resumable_session_cb(s,
-                                                                        ((cipher->algorithm_mkey & (SSL_kDHE | SSL_kECDHE)) != 0));
+                s->session->not_resumable =
+                    s->not_resumable_session_cb(s, ((cipher->algorithm_mkey
+                                                    & (SSL_kDHE | SSL_kECDHE))
+                                                   != 0));
             if (s->session->not_resumable)
                 /* do not send a session ticket */
                 s->tlsext_ticket_expected = 0;
@@ -1497,13 +1803,14 @@ WORK_STATE tls_post_process_client_hello(SSL *s, WORK_STATE wst)
          * s->s3->tmp.new_cipher- the new cipher to use.
          */
 
-        /* Handles TLS extensions that we couldn't check earlier */
-        if (s->version >= SSL3_VERSION) {
-            if (!ssl_check_clienthello_tlsext_late(s, &al)) {
-                SSLerr(SSL_F_TLS_POST_PROCESS_CLIENT_HELLO,
-                       SSL_R_CLIENTHELLO_TLSEXT);
-                goto f_err;
-            }
+        /*
+         * Call status_request callback if needed. Has to be done after the
+         * certificate callbacks etc above.
+         */
+        if (!tls_handle_status_request(s, &al)) {
+            SSLerr(SSL_F_TLS_POST_PROCESS_CLIENT_HELLO,
+                   SSL_R_CLIENTHELLO_TLSEXT);
+            goto f_err;
         }
 
         wst = WORK_MORE_B;
@@ -1597,18 +1904,22 @@ int tls_construct_server_hello(SSL *s, WPACKET *pkt)
         compm = s->s3->tmp.new_compression->id;
 #endif
 
-    if (!WPACKET_sub_memcpy_u8(pkt, s->session->session_id, sl)
+    if ((!SSL_IS_TLS13(s)
+                && !WPACKET_sub_memcpy_u8(pkt, s->session->session_id, sl))
             || !s->method->put_cipher_by_char(s->s3->tmp.new_cipher, pkt, &len)
-            || !WPACKET_put_bytes_u8(pkt, compm)
-            || !ssl_prepare_serverhello_tlsext(s)
-            || !ssl_add_serverhello_tlsext(s, pkt, &al)) {
+            || (!SSL_IS_TLS13(s)
+                && !WPACKET_put_bytes_u8(pkt, compm))
+            || !tls_construct_extensions(s, pkt,
+                                         SSL_IS_TLS13(s)
+                                            ? EXT_TLS1_3_SERVER_HELLO
+                                            : EXT_TLS1_2_SERVER_HELLO, &al)) {
         SSLerr(SSL_F_TLS_CONSTRUCT_SERVER_HELLO, ERR_R_INTERNAL_ERROR);
         goto err;
     }
 
     return 1;
  err:
-    ssl3_send_alert(s, SSL3_AL_FATAL, SSL_AD_INTERNAL_ERROR);
+    ssl3_send_alert(s, SSL3_AL_FATAL, al);
     return 0;
 }
 
@@ -2307,7 +2618,7 @@ static int tls_process_cke_dhe(SSL *s, PACKET *pkt, int *al)
         goto err;
     }
 
-    if (ssl_derive(s, skey, ckey) == 0) {
+    if (ssl_derive(s, skey, ckey, 1) == 0) {
         *al = SSL_AD_INTERNAL_ERROR;
         SSLerr(SSL_F_TLS_PROCESS_CKE_DHE, ERR_R_INTERNAL_ERROR);
         goto err;
@@ -2367,7 +2678,7 @@ static int tls_process_cke_ecdhe(SSL *s, PACKET *pkt, int *al)
         }
     }
 
-    if (ssl_derive(s, skey, ckey) == 0) {
+    if (ssl_derive(s, skey, ckey, 1) == 0) {
         *al = SSL_AD_INTERNAL_ERROR;
         SSLerr(SSL_F_TLS_PROCESS_CKE_ECDHE, ERR_R_INTERNAL_ERROR);
         goto err;
@@ -2767,6 +3078,7 @@ MSG_PROCESS_RETURN tls_process_cert_verify(SSL *s, PACKET *pkt)
         al = SSL_AD_INTERNAL_ERROR;
         goto f_err;
     }
+
 #ifdef SSL_DEBUG
     fprintf(stderr, "Using client verify alg %s\n", EVP_MD_name(md));
 #endif
@@ -2922,6 +3234,17 @@ MSG_PROCESS_RETURN tls_process_client_certificate(SSL *s, PACKET *pkt)
 
     sk_X509_pop_free(s->session->peer_chain, X509_free);
     s->session->peer_chain = sk;
+
+    /*
+     * Freeze the handshake buffer. For <TLS1.3 we do this after the CKE
+     * message
+     */
+    if (SSL_IS_TLS13(s) && !ssl3_digest_cached_records(s, 1)) {
+        al = SSL_AD_INTERNAL_ERROR;
+        SSLerr(SSL_F_TLS_PROCESS_CLIENT_CERTIFICATE, ERR_R_INTERNAL_ERROR);
+        goto f_err;
+    }
+
     /*
      * Inconsistency alert: cert_chain does *not* include the peer's own
      * certificate, while we do include it in statem_clnt.c
@@ -3163,6 +3486,26 @@ MSG_PROCESS_RETURN tls_process_next_proto(SSL *s, PACKET *pkt)
     return MSG_PROCESS_ERROR;
 }
 #endif
+
+static int tls_construct_encrypted_extensions(SSL *s, WPACKET *pkt)
+{
+    int al;
+
+    /*
+     * TODO(TLS1.3): For now we send certificate extensions in with the
+     * encrypted extensions. Later we need to move these to the certificate
+     * message.
+     */
+    if (!tls_construct_extensions(s, pkt, EXT_TLS1_3_ENCRYPTED_EXTENSIONS
+                                          | EXT_TLS1_3_CERTIFICATE, &al)) {
+        ssl3_send_alert(s, SSL3_AL_FATAL, al);
+        SSLerr(SSL_F_TLS_CONSTRUCT_ENCRYPTED_EXTENSIONS, ERR_R_INTERNAL_ERROR);
+        ssl3_send_alert(s, SSL3_AL_FATAL, al);
+        return 0;
+    }
+
+    return 1;
+}
 
 #define SSLV2_CIPHER_LEN    3
 

@@ -152,111 +152,6 @@ static void ssl3_take_mac(SSL *s)
 }
 #endif
 
-/*
- * Comparison function used in a call to qsort (see tls_collect_extensions()
- * below.)
- * The two arguments |p1| and |p2| are expected to be pointers to RAW_EXTENSIONs
- *
- * Returns:
- *  1 if the type for p1 is greater than p2
- *  0 if the type for p1 and p2 are the same
- * -1 if the type for p1 is less than p2
- */
-static int compare_extensions(const void *p1, const void *p2)
-{
-    const RAW_EXTENSION *e1 = (const RAW_EXTENSION *)p1;
-    const RAW_EXTENSION *e2 = (const RAW_EXTENSION *)p2;
-
-    if (e1->type < e2->type)
-        return -1;
-    else if (e1->type > e2->type)
-        return 1;
-
-    return 0;
-}
-
-/*
- * Gather a list of all the extensions. We don't actually process the content
- * of the extensions yet, except to check their types.
- *
- * Per http://tools.ietf.org/html/rfc5246#section-7.4.1.4, there may not be
- * more than one extension of the same type in a ClientHello or ServerHello.
- * This function returns 1 if all extensions are unique and we have parsed their
- * types, and 0 if the extensions contain duplicates, could not be successfully
- * parsed, or an internal error occurred.
- */
-/*
- * TODO(TLS1.3): Refactor ServerHello extension parsing to use this and then
- * remove tls1_check_duplicate_extensions()
- */
-int tls_collect_extensions(PACKET *packet, RAW_EXTENSION **res,
-                             size_t *numfound, int *ad)
-{
-    PACKET extensions = *packet;
-    size_t num_extensions = 0, i = 0;
-    RAW_EXTENSION *raw_extensions = NULL;
-
-    /* First pass: count the extensions. */
-    while (PACKET_remaining(&extensions) > 0) {
-        unsigned int type;
-        PACKET extension;
-
-        if (!PACKET_get_net_2(&extensions, &type) ||
-            !PACKET_get_length_prefixed_2(&extensions, &extension)) {
-            *ad = SSL_AD_DECODE_ERROR;
-            goto err;
-        }
-        num_extensions++;
-    }
-
-    if (num_extensions > 0) {
-        raw_extensions = OPENSSL_malloc(sizeof(*raw_extensions)
-                                        * num_extensions);
-        if (raw_extensions == NULL) {
-            *ad = SSL_AD_INTERNAL_ERROR;
-            SSLerr(SSL_F_TLS_COLLECT_EXTENSIONS, ERR_R_MALLOC_FAILURE);
-            goto err;
-        }
-
-        /* Second pass: collect the extensions. */
-        for (i = 0; i < num_extensions; i++) {
-            if (!PACKET_get_net_2(packet, &raw_extensions[i].type) ||
-                !PACKET_get_length_prefixed_2(packet,
-                                              &raw_extensions[i].data)) {
-                /* This should not happen. */
-                *ad = SSL_AD_INTERNAL_ERROR;
-                SSLerr(SSL_F_TLS_COLLECT_EXTENSIONS, ERR_R_INTERNAL_ERROR);
-                goto err;
-            }
-        }
-
-        if (PACKET_remaining(packet) != 0) {
-            *ad = SSL_AD_DECODE_ERROR;
-            SSLerr(SSL_F_TLS_COLLECT_EXTENSIONS, SSL_R_LENGTH_MISMATCH);
-            goto err;
-        }
-        /* Sort the extensions and make sure there are no duplicates. */
-        qsort(raw_extensions, num_extensions, sizeof(*raw_extensions),
-              compare_extensions);
-        for (i = 1; i < num_extensions; i++) {
-            if (raw_extensions[i - 1].type == raw_extensions[i].type) {
-                *ad = SSL_AD_DECODE_ERROR;
-                goto err;
-            }
-        }
-    }
-
-    *res = raw_extensions;
-    *numfound = num_extensions;
-    return 1;
-
- err:
-    OPENSSL_free(raw_extensions);
-    return 0;
-}
-
-
-
 MSG_PROCESS_RETURN tls_process_change_cipher_spec(SSL *s, PACKET *pkt)
 {
     int al;
@@ -326,11 +221,11 @@ MSG_PROCESS_RETURN tls_process_change_cipher_spec(SSL *s, PACKET *pkt)
 
 MSG_PROCESS_RETURN tls_process_finished(SSL *s, PACKET *pkt)
 {
-    int al;
+    int al = SSL_AD_INTERNAL_ERROR;
     size_t md_len;
 
     /* If this occurs, we have missed a message */
-    if (!s->s3->change_cipher_spec) {
+    if (!SSL_IS_TLS13(s) && !s->s3->change_cipher_spec) {
         al = SSL_AD_UNEXPECTED_MESSAGE;
         SSLerr(SSL_F_TLS_PROCESS_FINISHED, SSL_R_GOT_A_FIN_BEFORE_A_CCS);
         goto f_err;
@@ -365,6 +260,34 @@ MSG_PROCESS_RETURN tls_process_finished(SSL *s, PACKET *pkt)
         memcpy(s->s3->previous_server_finished, s->s3->tmp.peer_finish_md,
                md_len);
         s->s3->previous_server_finished_len = md_len;
+    }
+
+    /*
+     * In TLS1.3 we also have to change cipher state and do any final processing
+     * of the initial server flight (if we are a client)
+     */
+    if (SSL_IS_TLS13(s)) {
+        if (s->server) {
+            if (!s->method->ssl3_enc->change_cipher_state(s,
+                    SSL3_CC_APPLICATION | SSL3_CHANGE_CIPHER_SERVER_READ)) {
+                SSLerr(SSL_F_TLS_PROCESS_FINISHED, SSL_R_CANNOT_CHANGE_CIPHER);
+                goto f_err;
+            }
+        } else {
+            if (!s->method->ssl3_enc->generate_master_secret(s,
+                    s->session->master_key, s->handshake_secret, 0,
+                    &s->session->master_key_length)) {
+                SSLerr(SSL_F_TLS_PROCESS_FINISHED, SSL_R_CANNOT_CHANGE_CIPHER);
+                goto f_err;
+            }
+            if (!s->method->ssl3_enc->change_cipher_state(s,
+                    SSL3_CC_APPLICATION | SSL3_CHANGE_CIPHER_CLIENT_READ)) {
+                SSLerr(SSL_F_TLS_PROCESS_FINISHED, SSL_R_CANNOT_CHANGE_CIPHER);
+                goto f_err;
+            }
+            if (!tls_process_initial_server_flight(s, &al))
+                goto f_err;
+        }
     }
 
     return MSG_PROCESS_FINISHED_READING;
@@ -1025,15 +948,15 @@ int ssl_choose_server_version(SSL *s, CLIENTHELLO_MSG *hello)
         break;
     }
 
-    suppversions = tls_get_extension_by_type(hello->pre_proc_exts,
-                                             hello->num_extensions,
-                                             TLSEXT_TYPE_supported_versions);
+    suppversions = &hello->pre_proc_exts[TLSEXT_IDX_supported_versions];
 
-    if (suppversions != NULL && !SSL_IS_DTLS(s)) {
+    if (suppversions->present && !SSL_IS_DTLS(s)) {
         unsigned int candidate_vers = 0;
         unsigned int best_vers = 0;
         const SSL_METHOD *best_method = NULL;
         PACKET versionslist;
+
+        suppversions->parsed = 1;
 
         if (!PACKET_as_length_prefixed_1(&suppversions->data, &versionslist)) {
             /* Trailing or invalid data? */
@@ -1049,8 +972,6 @@ int ssl_choose_server_version(SSL *s, CLIENTHELLO_MSG *hello)
              * wheter to ignore versions <TLS1.2 in supported_versions. At the
              * moment we honour them if present. To be reviewed later
              */
-            if ((int)candidate_vers > s->client_version)
-                s->client_version = candidate_vers;
             if (version_cmp(s, candidate_vers, best_vers) <= 0)
                 continue;
             for (vent = table;
@@ -1271,7 +1192,7 @@ int ssl_get_client_min_max_version(const SSL *s, int *min_version,
 
 /*
  * ssl_set_client_hello_version - Work out what version we should be using for
- * the initial ClientHello.
+ * the initial ClientHello.legacy_version field.
  *
  * @s: client SSL handle.
  *
@@ -1286,6 +1207,12 @@ int ssl_set_client_hello_version(SSL *s)
     if (ret != 0)
         return ret;
 
-    s->client_version = s->version = ver_max;
+    s->version = ver_max;
+
+    /* TLS1.3 always uses TLS1.2 in the legacy_version field */
+    if (!SSL_IS_DTLS(s) && ver_max > TLS1_2_VERSION)
+        ver_max = TLS1_2_VERSION;
+
+    s->client_version = ver_max;
     return 0;
 }

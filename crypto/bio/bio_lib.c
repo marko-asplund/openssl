@@ -113,7 +113,7 @@ int BIO_free(BIO *a)
     if (a == NULL)
         return 0;
 
-    if (CRYPTO_atomic_add(&a->references, -1, &ret, a->lock) <= 0)
+    if (CRYPTO_DOWN_REF(&a->references, &ret, a->lock) <= 0)
         return 0;
 
     REF_PRINT_COUNT("BIO", a);
@@ -178,7 +178,7 @@ int BIO_up_ref(BIO *a)
 {
     int i;
 
-    if (CRYPTO_atomic_add(&a->references, 1, &i, a->lock) <= 0)
+    if (CRYPTO_UP_REF(&a->references, &i, a->lock) <= 0)
         return 0;
 
     REF_PRINT_COUNT("BIO", a);
@@ -269,7 +269,7 @@ static int bio_read_intern(BIO *b, void *data, size_t dlen, size_t *readbytes)
     ret = b->method->bread(b, data, dlen, readbytes);
 
     if (ret > 0)
-        b->num_read += (uint64_t)*read;
+        b->num_read += (uint64_t)*readbytes;
 
     if (b->callback != NULL || b->callback_ex != NULL)
         ret = (int)bio_call_callback(b, BIO_CB_READ | BIO_CB_RETURN, data,

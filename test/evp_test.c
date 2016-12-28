@@ -210,6 +210,10 @@ struct evp_test {
     const char *err, *aux_err;
     /* Expected error value of test */
     char *expected_err;
+    /* Expected error function string */
+    char *func;
+    /* Expected error reason string */
+    char *reason;
     /* Number of tests */
     int ntests;
     /* Error count */
@@ -296,6 +300,10 @@ static void free_expected(struct evp_test *t)
 {
     OPENSSL_free(t->expected_err);
     t->expected_err = NULL;
+    OPENSSL_free(t->func);
+    t->func = NULL;
+    OPENSSL_free(t->reason);
+    t->reason = NULL;
     OPENSSL_free(t->out_expected);
     OPENSSL_free(t->out_received);
     t->out_expected = NULL;
@@ -317,6 +325,9 @@ static void print_expected(struct evp_test *t)
 
 static int check_test_error(struct evp_test *t)
 {
+    unsigned long err;
+    const char *func;
+    const char *reason;
     if (!t->err && !t->expected_err)
         return 1;
     if (t->err && !t->expected_err) {
@@ -335,11 +346,44 @@ static int check_test_error(struct evp_test *t)
                 t->start_line, t->expected_err);
         return 0;
     }
-    if (strcmp(t->err, t->expected_err) == 0)
+
+    if (strcmp(t->err, t->expected_err) != 0) {
+        fprintf(stderr, "Test line %d: expecting %s got %s\n",
+                t->start_line, t->expected_err, t->err);
+        return 0;
+    }
+
+    if (t->func == NULL && t->reason == NULL)
         return 1;
 
-    fprintf(stderr, "Test line %d: expecting %s got %s\n",
-            t->start_line, t->expected_err, t->err);
+    if (t->func == NULL || t->reason == NULL) {
+        fprintf(stderr, "Test line %d: missing function or reason code\n",
+                t->start_line);
+        return 0;
+    }
+
+    err = ERR_peek_error();
+    if (err == 0) {
+        fprintf(stderr, "Test line %d, expected error \"%s:%s\" not set\n",
+                t->start_line, t->func, t->reason);
+        return 0;
+    }
+
+    func = ERR_func_error_string(err);
+    reason = ERR_reason_error_string(err);
+
+    if (func == NULL && reason == NULL) {
+        fprintf(stderr, "Test line %d: expected error \"%s:%s\", no strings available.  Skipping...\n",
+                t->start_line, t->func, t->reason);
+        return 1;
+    }
+
+    if (strcmp(func, t->func) == 0 && strcmp(reason, t->reason) == 0)
+        return 1;
+
+    fprintf(stderr, "Test line %d: expected error \"%s:%s\", got \"%s:%s\"\n",
+            t->start_line, t->func, t->reason, func, reason);
+
     return 0;
 }
 
@@ -351,25 +395,27 @@ static int setup_test(struct evp_test *t, const struct evp_test_method *tmeth)
     if (t->meth) {
         t->ntests++;
         if (t->skip) {
-            t->meth = tmeth;
             t->nskip++;
-            return 1;
+        } else {
+            /* run the test */
+            if (t->err == NULL && t->meth->run_test(t) != 1) {
+                fprintf(stderr, "%s test error line %d\n",
+                        t->meth->name, t->start_line);
+                return 0;
+            }
+            if (!check_test_error(t)) {
+                if (t->err)
+                    ERR_print_errors_fp(stderr);
+                t->errors++;
+            }
         }
-        t->err = NULL;
-        if (t->meth->run_test(t) != 1) {
-            fprintf(stderr, "%s test error line %d\n",
-                    t->meth->name, t->start_line);
-            return 0;
-        }
-        if (!check_test_error(t)) {
-            if (t->err)
-                ERR_print_errors_fp(stderr);
-            t->errors++;
-        }
+        /* clean it up */
         ERR_clear_error();
-        t->meth->cleanup(t);
-        OPENSSL_free(t->data);
-        t->data = NULL;
+        if (t->data != NULL) {
+            t->meth->cleanup(t);
+            OPENSSL_free(t->data);
+            t->data = NULL;
+        }
         OPENSSL_free(t->expected_err);
         t->expected_err = NULL;
         free_expected(t);
@@ -492,7 +538,23 @@ static int process_test(struct evp_test *t, char *buf, int verbose)
             return 0;
         }
         t->expected_err = OPENSSL_strdup(value);
-        if (!t->expected_err)
+        if (t->expected_err == NULL)
+            return 0;
+    } else if (strcmp(keyword, "Function") == 0) {
+        if (t->func != NULL) {
+            fprintf(stderr, "Line %d: multiple function lines\n", t->line);
+            return 0;
+        }
+        t->func = OPENSSL_strdup(value);
+        if (t->func == NULL)
+            return 0;
+    } else if (strcmp(keyword, "Reason") == 0) {
+        if (t->reason != NULL) {
+            fprintf(stderr, "Line %d: multiple reason lines\n", t->line);
+            return 0;
+        }
+        t->reason = OPENSSL_strdup(value);
+        if (t->reason == NULL)
             return 0;
     } else {
         /* Must be test specific line: try to parse it */
@@ -564,6 +626,7 @@ int main(int argc, char **argv)
         return 1;
     }
     t.in = in;
+    t.err = NULL;
     while (BIO_gets(in, buf, sizeof(buf))) {
         t.line++;
         if (!process_test(&t, buf, 0))
@@ -1212,9 +1275,7 @@ static int pkey_test_init(struct evp_test *t, const char *name,
         rv = find_key(&pkey, name, t->public);
     if (!rv)
         rv = find_key(&pkey, name, t->private);
-    if (!rv)
-        return 0;
-    if (!pkey) {
+    if (!rv || pkey == NULL) {
         t->skip = 1;
         return 1;
     }
@@ -1233,7 +1294,7 @@ static int pkey_test_init(struct evp_test *t, const char *name,
     if (!kdata->ctx)
         return 0;
     if (keyopinit(kdata->ctx) <= 0)
-        return 0;
+        t->err = "KEYOP_INIT_ERROR";
     return 1;
 }
 
@@ -1259,10 +1320,20 @@ static int pkey_test_ctrl(struct evp_test *t, EVP_PKEY_CTX *pctx,
     if (p != NULL)
         *p++ = 0;
     rv = EVP_PKEY_CTX_ctrl_str(pctx, tmpval, p);
-    if (p != NULL && rv <= 0 && rv != -2) {
-        /* If p has an OID assume disabled algorithm */
-        if (OBJ_sn2nid(p) != NID_undef || OBJ_ln2nid(p) != NID_undef) {
+    if (rv == -2) {
+        t->err = "PKEY_CTRL_INVALID";
+        rv = 1;
+    } else if (p != NULL && rv <= 0) {
+        /* If p has an OID and lookup fails assume disabled algorithm */
+        int nid = OBJ_sn2nid(p);
+        if (nid == NID_undef)
+             nid = OBJ_ln2nid(p);
+        if ((nid != NID_undef) && EVP_get_digestbynid(nid) == NULL &&
+            EVP_get_cipherbynid(nid) == NULL) {
             t->skip = 1;
+            rv = 1;
+        } else {
+            t->err = "PKEY_CTRL_ERROR";
             rv = 1;
         }
     }

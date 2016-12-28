@@ -12,6 +12,7 @@
 #include "../ssl/ssl_locl.h"
 
 #include "testutil.h"
+#include "test_main.h"
 
 #define IVLEN   12
 #define KEYLEN  16
@@ -160,6 +161,22 @@ int ssl_handshake_hash(SSL *s, unsigned char *out, size_t outlen,
 const EVP_MD *ssl_handshake_md(SSL *s)
 {
     return EVP_sha256();
+}
+
+void RECORD_LAYER_reset_read_sequence(RECORD_LAYER *rl)
+{
+}
+
+void RECORD_LAYER_reset_write_sequence(RECORD_LAYER *rl)
+{
+}
+
+int ssl_cipher_get_evp(const SSL_SESSION *s, const EVP_CIPHER **enc,
+                       const EVP_MD **md, int *mac_pkey_type,
+                       size_t *mac_secret_size, SSL_COMP **comp, int use_etm)
+
+{
+    return 0;
 }
 
 /* End of mocked out code */
@@ -326,28 +343,7 @@ static int test_handshake_secrets(void)
     return ret;
 }
 
-int main(int argc, char *argv[])
+void register_tests()
 {
-    BIO *err = NULL;
-    int testresult = 1;
-
-    err = BIO_new_fp(stderr, BIO_NOCLOSE | BIO_FP_TEXT);
-
-    CRYPTO_set_mem_debug(1);
-    CRYPTO_mem_ctrl(CRYPTO_MEM_CHECK_ON);
-
     ADD_TEST(test_handshake_secrets);
-
-    testresult = run_tests(argv[0]);
-
-#ifndef OPENSSL_NO_CRYPTO_MDEBUG
-    if (CRYPTO_mem_leaks(err) <= 0)
-        testresult = 1;
-#endif
-    BIO_free(err);
-
-    if (!testresult)
-        fprintf(stderr, "PASS\n");
-
-    return testresult;
 }

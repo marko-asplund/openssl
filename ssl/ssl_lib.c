@@ -682,7 +682,7 @@ int SSL_up_ref(SSL *s)
 {
     int i;
 
-    if (CRYPTO_atomic_add(&s->references, 1, &i, s->lock) <= 0)
+    if (CRYPTO_UP_REF(&s->references, &i, s->lock) <= 0)
         return 0;
 
     REF_PRINT_COUNT("SSL", s);
@@ -965,7 +965,7 @@ void SSL_free(SSL *s)
     if (s == NULL)
         return;
 
-    CRYPTO_atomic_add(&s->references, -1, &i, s->lock);
+    CRYPTO_DOWN_REF(&s->references, &i, s->lock);
     REF_PRINT_COUNT("SSL", s);
     if (i > 0)
         return;
@@ -1379,7 +1379,7 @@ int SSL_copy_session_id(SSL *t, const SSL *f)
             return 0;
     }
 
-    CRYPTO_atomic_add(&f->cert->references, 1, &i, f->cert->lock);
+    CRYPTO_UP_REF(&f->cert->references, &i, f->cert->lock);
     ssl_cert_free(t->cert);
     t->cert = f->cert;
     if (!SSL_set_session_id_context(t, f->sid_ctx, (int)f->sid_ctx_length)) {
@@ -2556,7 +2556,7 @@ SSL_CTX *SSL_CTX_new(const SSL_METHOD *meth)
      */
     ret->options |= SSL_OP_NO_COMPRESSION;
 
-    ret->tlsext_status_type = -1;
+    ret->tlsext_status_type = TLSEXT_STATUSTYPE_nothing;
 
     return ret;
  err:
@@ -2570,7 +2570,7 @@ int SSL_CTX_up_ref(SSL_CTX *ctx)
 {
     int i;
 
-    if (CRYPTO_atomic_add(&ctx->references, 1, &i, ctx->lock) <= 0)
+    if (CRYPTO_UP_REF(&ctx->references, &i, ctx->lock) <= 0)
         return 0;
 
     REF_PRINT_COUNT("SSL_CTX", ctx);
@@ -2585,7 +2585,7 @@ void SSL_CTX_free(SSL_CTX *a)
     if (a == NULL)
         return;
 
-    CRYPTO_atomic_add(&a->references, -1, &i, a->lock);
+    CRYPTO_DOWN_REF(&a->references, &i, a->lock);
     REF_PRINT_COUNT("SSL_CTX", a);
     if (i > 0)
         return;
@@ -3199,7 +3199,7 @@ SSL *SSL_dup(SSL *s)
 
     /* If we're not quiescent, just up_ref! */
     if (!SSL_in_init(s) || !SSL_in_before(s)) {
-        CRYPTO_atomic_add(&s->references, 1, &i, s->lock);
+        CRYPTO_UP_REF(&s->references, &i, s->lock);
         return s;
     }
 
@@ -3828,8 +3828,7 @@ EVP_MD_CTX *ssl_replace_hash(EVP_MD_CTX **hash, const EVP_MD *md)
 void ssl_clear_hash_ctx(EVP_MD_CTX **hash)
 {
 
-    if (*hash)
-        EVP_MD_CTX_free(*hash);
+    EVP_MD_CTX_free(*hash);
     *hash = NULL;
 }
 
@@ -4279,6 +4278,7 @@ int ssl_validate_ct(SSL *s)
     CT_POLICY_EVAL_CTX_set1_cert(ctx, cert);
     CT_POLICY_EVAL_CTX_set1_issuer(ctx, issuer);
     CT_POLICY_EVAL_CTX_set_shared_CTLOG_STORE(ctx, s->ctx->ctlog_store);
+    CT_POLICY_EVAL_CTX_set_time(ctx, SSL_SESSION_get_time(SSL_get0_session(s)));
 
     scts = SSL_get0_peer_scts(s);
 

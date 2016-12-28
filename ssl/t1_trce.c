@@ -92,6 +92,7 @@ static ssl_trace_tbl ssl_handshake_tbl[] = {
     {SSL3_MT_CERTIFICATE_VERIFY, "CertificateVerify"},
     {SSL3_MT_CLIENT_KEY_EXCHANGE, "ClientKeyExchange"},
     {SSL3_MT_FINISHED, "Finished"},
+    {SSL3_MT_ENCRYPTED_EXTENSIONS, "EncryptedExtensions"},
     {SSL3_MT_CERTIFICATE_STATUS, "CertificateStatus"}
 };
 
@@ -447,6 +448,7 @@ static ssl_trace_tbl ssl_exts_tbl[] = {
     {TLSEXT_TYPE_client_authz, "client_authz"},
     {TLSEXT_TYPE_server_authz, "server_authz"},
     {TLSEXT_TYPE_cert_type, "cert_type"},
+    {TLSEXT_TYPE_key_share, "key_share"},
     {TLSEXT_TYPE_supported_groups, "supported_groups"},
     {TLSEXT_TYPE_ec_point_formats, "ec_point_formats"},
     {TLSEXT_TYPE_srp, "srp"},
@@ -527,11 +529,6 @@ static ssl_trace_tbl ssl_sig_tbl[] = {
     {TLSEXT_signature_gostr34102012_512, "gost2012_512"}
 };
 
-static ssl_trace_tbl ssl_hb_tbl[] = {
-    {1, "peer_allowed_to_send"},
-    {2, "peer_not_allowed_to_send"}
-};
-
 static ssl_trace_tbl ssl_ctype_tbl[] = {
     {1, "rsa_sign"},
     {2, "dss_sign"},
@@ -592,12 +589,18 @@ static int ssl_print_hexbuf(BIO *bio, int indent,
 }
 
 static int ssl_print_version(BIO *bio, int indent, const char *name,
-                             const unsigned char **pmsg, size_t *pmsglen)
+                             const unsigned char **pmsg, size_t *pmsglen,
+                             unsigned int *version)
 {
     int vers;
+
     if (*pmsglen < 2)
         return 0;
     vers = ((*pmsg)[0] << 8) | (*pmsg)[1];
+    if (version != NULL) {
+        /* TODO(TLS1.3): Remove the draft conditional here before release */
+        *version = (vers == TLS1_3_VERSION_DRAFT) ? TLS1_3_VERSION : vers;
+    }
     BIO_indent(bio, indent, 80);
     BIO_printf(bio, "%s=0x%x (%s)\n",
                name, vers, ssl_trace_str(vers, ssl_version_tbl));
@@ -645,7 +648,7 @@ static int ssl_print_signature(BIO *bio, int indent, SSL *s,
 static int ssl_print_extension(BIO *bio, int indent, int server, int extype,
                                const unsigned char *ext, size_t extlen)
 {
-    size_t xlen;
+    size_t xlen, share_len;
     BIO_indent(bio, indent, 80);
     BIO_printf(bio, "extension_type=%s(%d), length=%d\n",
                ssl_trace_str(extype, ssl_exts_tbl), extype, (int)extlen);
@@ -718,6 +721,35 @@ static int ssl_print_extension(BIO *bio, int indent, int server, int extype,
             ssl_print_hex(bio, indent + 4, "ticket", ext, extlen);
         break;
 
+    case TLSEXT_TYPE_key_share:
+        if (extlen < 2)
+            return 0;
+        if (server) {
+            xlen = extlen;
+        } else {
+            xlen = (ext[0] << 8) | ext[1];
+            if (extlen != xlen + 2)
+                return 0;
+            ext += 2;
+        }
+        for (; xlen > 0; ext += share_len, xlen -= share_len) {
+            int group_id;
+
+            if (xlen < 4)
+                return 0;
+            group_id = (ext[0] << 8) | ext[1];
+            share_len = (ext[2] << 8) | ext[3];
+            ext += 4;
+            xlen -= 4;
+            if (xlen < share_len)
+                return 0;
+            BIO_indent(bio, indent + 4, 80);
+            BIO_printf(bio, "NamedGroup: %s\n",
+                       ssl_trace_str(group_id, ssl_groups_tbl));
+            ssl_print_hex(bio, indent + 4, "key_exchange: ", ext, share_len);
+        }
+        break;
+
     case TLSEXT_TYPE_supported_versions:
         if (extlen < 1)
             return 0;
@@ -771,7 +803,7 @@ static int ssl_print_client_hello(BIO *bio, SSL *ssl, int indent,
 {
     size_t len;
     unsigned int cs;
-    if (!ssl_print_version(bio, indent, "client_version", &msg, &msglen))
+    if (!ssl_print_version(bio, indent, "client_version", &msg, &msglen, NULL))
         return 0;
     if (!ssl_print_random(bio, indent, &msg, &msglen))
         return 0;
@@ -824,7 +856,7 @@ static int ssl_print_client_hello(BIO *bio, SSL *ssl, int indent,
 static int dtls_print_hello_vfyrequest(BIO *bio, int indent,
                                        const unsigned char *msg, size_t msglen)
 {
-    if (!ssl_print_version(bio, indent, "server_version", &msg, &msglen))
+    if (!ssl_print_version(bio, indent, "server_version", &msg, &msglen, NULL))
         return 0;
     if (!ssl_print_hexbuf(bio, indent, "cookie", 1, &msg, &msglen))
         return 0;
@@ -835,11 +867,14 @@ static int ssl_print_server_hello(BIO *bio, int indent,
                                   const unsigned char *msg, size_t msglen)
 {
     unsigned int cs;
-    if (!ssl_print_version(bio, indent, "server_version", &msg, &msglen))
+    unsigned int vers;
+
+    if (!ssl_print_version(bio, indent, "server_version", &msg, &msglen, &vers))
         return 0;
     if (!ssl_print_random(bio, indent, &msg, &msglen))
         return 0;
-    if (!ssl_print_hexbuf(bio, indent, "session_id", 1, &msg, &msglen))
+    if (vers != TLS1_3_VERSION
+            && !ssl_print_hexbuf(bio, indent, "session_id", 1, &msg, &msglen))
         return 0;
     if (msglen < 2)
         return 0;
@@ -849,13 +884,15 @@ static int ssl_print_server_hello(BIO *bio, int indent,
                msg[0], msg[1], ssl_trace_str(cs, ssl_ciphers_tbl));
     msg += 2;
     msglen -= 2;
-    if (msglen < 1)
-        return 0;
-    BIO_indent(bio, indent, 80);
-    BIO_printf(bio, "compression_method: %s (0x%02X)\n",
-               ssl_trace_str(msg[0], ssl_comp_tbl), msg[0]);
-    msg++;
-    msglen--;
+    if (vers != TLS1_3_VERSION) {
+        if (msglen < 1)
+            return 0;
+        BIO_indent(bio, indent, 80);
+        BIO_printf(bio, "compression_method: %s (0x%02X)\n",
+                   ssl_trace_str(msg[0], ssl_comp_tbl), msg[0]);
+        msg++;
+        msglen--;
+    }
     if (!ssl_print_extensions(bio, indent, 1, msg, msglen))
         return 0;
     return 1;
@@ -1247,6 +1284,11 @@ static int ssl_print_handshake(BIO *bio, SSL *ssl,
 
     case SSL3_MT_NEWSESSION_TICKET:
         if (!ssl_print_ticket(bio, indent + 2, msg, msglen))
+            return 0;
+        break;
+
+    case SSL3_MT_ENCRYPTED_EXTENSIONS:
+        if (!ssl_print_extensions(bio, indent + 2, 1, msg, msglen))
             return 0;
         break;
 

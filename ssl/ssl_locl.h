@@ -66,6 +66,7 @@
 # include "statem/statem.h"
 # include "packet_locl.h"
 # include "internal/dane.h"
+# include "internal/refcount.h"
 
 # ifdef OPENSSL_BUILD_SHLIBSSL
 #  undef OPENSSL_EXTERN
@@ -351,7 +352,9 @@
 # define SSL_IS_DTLS(s)  (s->method->ssl3_enc->enc_flags & SSL_ENC_FLAG_DTLS)
 
 /* Check if we are using TLSv1.3 */
-# define SSL_IS_TLS13(s) (!SSL_IS_DTLS(s) && (s)->version >= TLS1_3_VERSION)
+# define SSL_IS_TLS13(s) (!SSL_IS_DTLS(s) \
+                          && (s)->method->version >= TLS1_3_VERSION \
+                          && (s)->method->version != TLS_ANY_VERSION)
 
 /* See if we need explicit IV */
 # define SSL_USE_EXPLICIT_IV(s)  \
@@ -536,7 +539,7 @@ struct ssl_session_st {
      * certificate is not ok, we must remember the error for session reuse:
      */
     long verify_result;         /* only for servers */
-    int references;
+    CRYPTO_REF_COUNT references;
     long timeout;
     long time;
     unsigned int compress_meth; /* Need to lookup the method */
@@ -663,7 +666,7 @@ struct ssl_ctx_st {
                                  * :-) */
     } stats;
 
-    int references;
+    CRYPTO_REF_COUNT references;
 
     /* if defined, these override the X509_verify_cert() calls */
     int (*app_verify_callback) (X509_STORE_CTX *, void *);
@@ -954,11 +957,15 @@ struct ssl_st {
      */
     unsigned char early_secret[EVP_MAX_MD_SIZE];
     unsigned char handshake_secret[EVP_MAX_MD_SIZE];
+    unsigned char client_finished_secret[EVP_MAX_MD_SIZE];
+    unsigned char server_finished_secret[EVP_MAX_MD_SIZE];
     EVP_CIPHER_CTX *enc_read_ctx; /* cryptographic state */
+    unsigned char read_iv[EVP_MAX_IV_LENGTH]; /* TLSv1.3 static read IV */
     EVP_MD_CTX *read_hash;      /* used for mac generation */
     COMP_CTX *compress;         /* compression */
     COMP_CTX *expand;           /* uncompress */
     EVP_CIPHER_CTX *enc_write_ctx; /* cryptographic state */
+    unsigned char write_iv[EVP_MAX_IV_LENGTH]; /* TLSv1.3 static write IV */
     EVP_MD_CTX *write_hash;     /* used for mac generation */
     /* session info */
     /* client cert? */
@@ -1006,7 +1013,7 @@ struct ssl_st {
     CRYPTO_EX_DATA ex_data;
     /* for server side, keep the list of CA_dn we can use */
     STACK_OF(X509_NAME) *client_CA;
-    int references;
+    CRYPTO_REF_COUNT references;
     /* protocol behaviour */
     uint32_t options;
     /* API behaviour */
@@ -1015,7 +1022,10 @@ struct ssl_st {
     int max_proto_version;
     size_t max_cert_list;
     int first_packet;
-    /* what was passed, used for SSLv3/TLS rollback check */
+    /*
+     * What was passed in ClientHello.legacy_version. Used for RSA pre-master
+     * secret and SSLv3/TLS (<=1.2) rollback check
+     */
     int client_version;
     /*
      * If we're using more than one pipeline how should we divide the data
@@ -1299,6 +1309,8 @@ typedef struct ssl3_state_st {
 
     /* For clients: peer temporary key */
 # if !defined(OPENSSL_NO_EC) || !defined(OPENSSL_NO_DH)
+    /* The group_id for the DH/ECDH key */
+    unsigned int group_id;
     EVP_PKEY *peer_tmp;
 # endif
 
@@ -1541,7 +1553,7 @@ typedef struct cert_st {
     /* If not NULL psk identity hint to use for servers */
     char *psk_identity_hint;
 # endif
-    int references;             /* >1 only if SSL_copy_session_id is used */
+    CRYPTO_REF_COUNT references;             /* >1 only if SSL_copy_session_id is used */
     CRYPTO_RWLOCK *lock;
 } CERT;
 
@@ -1624,9 +1636,46 @@ typedef struct ssl3_comp_st {
 # endif
 
 typedef struct raw_extension_st {
-    unsigned int type;
+    /* Raw packet data for the extension */
     PACKET data;
+    /* Set to 1 if the extension is present or 0 otherwise */
+    int present;
+    /* Set to 1 if we have already parsed the extension or 0 otherwise */
+    int parsed;
+    /* The type of this extension, i.e. a TLSEXT_TYPE_* value */
+    unsigned int type;
 } RAW_EXTENSION;
+
+/*
+ * Extension index values NOTE: Any updates to these defines should be mirrored
+ * with equivalent updates to ext_defs in extensions.c
+ */
+typedef enum tlsext_index_en {
+    TLSEXT_IDX_renegotiate,
+    TLSEXT_IDX_server_name,
+    TLSEXT_IDX_srp,
+    TLSEXT_IDX_ec_point_formats,
+    TLSEXT_IDX_supported_groups,
+    TLSEXT_IDX_session_ticket,
+    TLSEXT_IDX_signature_algorithms,
+    TLSEXT_IDX_status_request,
+    TLSEXT_IDX_next_proto_neg,
+    TLSEXT_IDX_application_layer_protocol_negotiation,
+    TLSEXT_IDX_use_srtp,
+    TLSEXT_IDX_encrypt_then_mac,
+    TLSEXT_IDX_signed_certificate_timestamp,
+    TLSEXT_IDX_extended_master_secret,
+    TLSEXT_IDX_supported_versions,
+    TLSEXT_IDX_key_share,
+    TLSEXT_IDX_cryptopro_bug,
+    TLSEXT_IDX_padding
+} TLSEXT_INDEX;
+
+/*
+ * Dummy status type for the status_type extension. Indicates no status type
+ * set
+ */
+#define TLSEXT_STATUSTYPE_nothing  -1
 
 #define MAX_COMPRESSIONS_SIZE   255
 
@@ -1642,7 +1691,6 @@ typedef struct {
     size_t compressions_len;
     unsigned char compressions[MAX_COMPRESSIONS_SIZE];
     PACKET extensions;
-    size_t num_extensions;
     RAW_EXTENSION *pre_proc_exts;
 } CLIENTHELLO_MSG;
 
@@ -1877,7 +1925,8 @@ __owur int ssl_fill_hello_random(SSL *s, int server, unsigned char *field,
 __owur int ssl_generate_master_secret(SSL *s, unsigned char *pms, size_t pmslen,
                                       int free_pms);
 __owur EVP_PKEY *ssl_generate_pkey(EVP_PKEY *pm);
-__owur int ssl_derive(SSL *s, EVP_PKEY *privkey, EVP_PKEY *pubkey);
+__owur int ssl_derive(SSL *s, EVP_PKEY *privkey, EVP_PKEY *pubkey,
+                      int genmaster);
 __owur EVP_PKEY *ssl_dh_to_pkey(DH *dh);
 
 __owur const SSL_CIPHER *ssl3_get_cipher_by_char(const unsigned char *p);
@@ -1999,6 +2048,10 @@ __owur size_t tls1_final_finish_mac(SSL *s, const char *str, size_t slen,
 __owur int tls1_generate_master_secret(SSL *s, unsigned char *out,
                                        unsigned char *p, size_t len,
                                        size_t *secret_size);
+__owur int tls13_setup_key_block(SSL *s);
+__owur size_t tls13_final_finish_mac(SSL *s, const char *str, size_t slen,
+                                     unsigned char *p);
+__owur int tls13_change_cipher_state(SSL *s, int which);
 __owur int tls13_derive_secret(SSL *s, const unsigned char *insecret,
                                const unsigned char *label, size_t labellen,
                                unsigned char *secret);
@@ -2043,6 +2096,8 @@ __owur int tls1_set_groups(unsigned char **pext, size_t *pextlen,
                            int *curves, size_t ncurves);
 __owur int tls1_set_groups_list(unsigned char **pext, size_t *pextlen,
                                 const char *str);
+void tls1_get_formatlist(SSL *s, const unsigned char **pformats,
+                         size_t *num_formats);
 __owur int tls1_check_ec_tmp_key(SSL *s, unsigned long id);
 __owur EVP_PKEY *ssl_generate_pkey_curve(int id);
 #  endif                        /* OPENSSL_NO_EC */
@@ -2050,21 +2105,18 @@ __owur EVP_PKEY *ssl_generate_pkey_curve(int id);
 __owur int tls1_shared_list(SSL *s,
                             const unsigned char *l1, size_t l1len,
                             const unsigned char *l2, size_t l2len, int nmatch);
-__owur int ssl_add_clienthello_tlsext(SSL *s, WPACKET *pkt, int *al);
-__owur int ssl_add_serverhello_tlsext(SSL *s, WPACKET *pkt, int *al);
-__owur int ssl_parse_clienthello_tlsext(SSL *s, CLIENTHELLO_MSG *hello);
+__owur int tls_curve_allowed(SSL *s, const unsigned char *curve, int op);
+__owur  int tls1_get_curvelist(SSL *s, int sess, const unsigned char **pcurves,
+                               size_t *num_curves);
+
 void ssl_set_default_md(SSL *s);
 __owur int tls1_set_server_sigalgs(SSL *s);
-__owur int ssl_check_clienthello_tlsext_late(SSL *s, int *al);
-__owur int ssl_parse_serverhello_tlsext(SSL *s, PACKET *pkt);
-__owur int ssl_prepare_clienthello_tlsext(SSL *s);
-__owur int ssl_prepare_serverhello_tlsext(SSL *s);
 __owur RAW_EXTENSION *tls_get_extension_by_type(RAW_EXTENSION *exts,
                                                 size_t numexts,
                                                 unsigned int type);
 __owur int tls_get_ticket_from_client(SSL *s, CLIENTHELLO_MSG *hello,
                                       SSL_SESSION **ret);
-__owur int tls_check_client_ems_support(SSL *s, const CLIENTHELLO_MSG *hello);
+__owur int tls_use_ticket(SSL *s);
 
 __owur int tls12_get_sigandhash(WPACKET *pkt, const EVP_PKEY *pk,
                                 const EVP_MD *md);
@@ -2093,9 +2145,6 @@ __owur int ssl_security_cert_chain(SSL *s, STACK_OF(X509) *sk, X509 *ex,
 
 __owur EVP_MD_CTX *ssl_replace_hash(EVP_MD_CTX **hash, const EVP_MD *md);
 void ssl_clear_hash_ctx(EVP_MD_CTX **hash);
-__owur int ssl_add_serverhello_renegotiate_ext(SSL *s, WPACKET *pkt);
-__owur int ssl_parse_serverhello_renegotiate_ext(SSL *s, PACKET *pkt, int *al);
-__owur int ssl_parse_clienthello_renegotiate_ext(SSL *s, PACKET *pkt, int *al);
 __owur long ssl_get_algorithm2(SSL *s);
 __owur int tls12_copy_sigalgs(SSL *s, WPACKET *pkt,
                               const unsigned char *psig, size_t psiglen);
@@ -2106,9 +2155,6 @@ __owur int tls12_check_peer_sigalg(const EVP_MD **pmd, SSL *s,
                                    const unsigned char *sig, EVP_PKEY *pkey);
 void ssl_set_client_disabled(SSL *s);
 __owur int ssl_cipher_disabled(SSL *s, const SSL_CIPHER *c, int op);
-
-__owur int ssl_parse_clienthello_use_srtp_ext(SSL *s, PACKET *pkt, int *al);
-__owur int ssl_parse_serverhello_use_srtp_ext(SSL *s, PACKET *pkt, int *al);
 
 __owur int ssl_handshake_hash(SSL *s, unsigned char *out, size_t outlen,
                                  size_t *hashlen);

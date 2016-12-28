@@ -100,8 +100,16 @@ static int execute_test_large_message(const SSL_METHOD *smeth,
         goto end;
     }
 
-    testresult = 1;
+    /*
+     * Calling SSL_clear() first is not required but this tests that SSL_clear()
+     * doesn't leak (when using enable-crypto-mdebug).
+     */
+    if (!SSL_clear(serverssl)) {
+        printf("Unexpected failure from SSL_clear()\n");
+        goto end;
+    }
 
+    testresult = 1;
  end:
     X509_free(chaincert);
     SSL_free(serverssl);
@@ -429,6 +437,12 @@ static int execute_test_session(SSL_SESSION_TEST_FIXTURE fix)
     /* Only allow TLS1.2 so we can force a connection failure later */
     SSL_CTX_set_min_proto_version(cctx, TLS1_2_VERSION);
 #endif
+
+    /*
+     * TODO(TLS1.3): Test temporarily disabled for TLS1.3 until we've
+     * implemented session resumption.
+     */
+    SSL_CTX_set_max_proto_version(cctx, TLS1_2_VERSION);
 
     /* Set up session cache */
     if (fix.use_ext_cache) {
